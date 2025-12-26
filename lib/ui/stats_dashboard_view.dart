@@ -154,6 +154,7 @@ class _StatsDashboardViewState extends State<StatsDashboardView> {
         : '${(data.completionRate!.clamp(0.0, 1.0) * 100).round()}%';
 
     return ListView(
+      key: const ValueKey('stats_home'),
       physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.all(16),
       children: [
@@ -208,6 +209,7 @@ class _StatsDashboardViewState extends State<StatsDashboardView> {
 
   ListView _buildYesterdayPage(BuildContext context, _StatsComputed data) {
     return ListView(
+      key: const ValueKey('stats_yesterday'),
       physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.all(16),
       children: [
@@ -266,6 +268,7 @@ class _StatsDashboardViewState extends State<StatsDashboardView> {
 
   ListView _buildEventsPage(BuildContext context, _StatsComputed data) {
     return ListView(
+      key: const ValueKey('stats_events'),
       physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.all(16),
       children: [

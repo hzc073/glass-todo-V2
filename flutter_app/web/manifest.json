@@ -1,0 +1,12 @@
+﻿{
+  "name": "Glass Todo",
+  "short_name": "Glass Todo",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#F3EEE4",
+  "theme_color": "#F3EEE4",
+  "description": "Glass Todo 网页客户端",
+  "orientation": "portrait-primary",
+  "gcm_sender_id": "103953800507",
+  "icons": []
+}

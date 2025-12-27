@@ -1,1 +1,0 @@
- F:\\Homework\\glass-todo\\flutter\\build\\web\\manifest.json:  F:\\Homework\\glass-todo\\flutter\\web\\index.html F:\\Homework\\glass-todo\\flutter\\web\\manifest.json

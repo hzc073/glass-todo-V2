@@ -1083,6 +1083,16 @@ int _taskPlannedMinutes(Task task) {
     return (start + 30).clamp(0, 24 * 60) - start;
   }
 
+  DateTime? parseDayKey(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return null;
+    try {
+      return DateFormat('yyyy-MM-dd').parseStrict(trimmed);
+    } catch (_) {
+      return DateTime.tryParse('${trimmed}T00:00:00');
+    }
+  }
+
   final plusIndex = endRaw.lastIndexOf('+');
   final hasExplicitOffset = plusIndex > 0;
   final explicitOffset = hasExplicitOffset
@@ -1095,18 +1105,23 @@ int _taskPlannedMinutes(Task task) {
     return (start + 30).clamp(0, 24 * 60) - start;
   }
 
-  int endTotalMinutes;
+  var offsetDays = explicitOffset;
+  final startDay = parseDayKey(task.dueDate);
+  final endDay = parseDayKey(task.endDate);
+  if (startDay != null && endDay != null) {
+    offsetDays = endDay.difference(startDay).inDays;
+  }
+  if (offsetDays < 0) offsetDays = 0;
+
+  var endMinutes = end;
   if (timePart == '24:00') {
-    endTotalMinutes = 24 * 60;
-  } else if (explicitOffset > 0) {
-    endTotalMinutes = explicitOffset.clamp(0, 1) * 24 * 60 + end;
-  } else if (end <= start) {
-    endTotalMinutes = 24 * 60 + end;
-  } else {
-    endTotalMinutes = end;
+    endMinutes = 0;
+    offsetDays += 1;
+  } else if (offsetDays == 0 && endMinutes <= start) {
+    offsetDays = 1;
   }
 
-  final planned = endTotalMinutes - start;
+  final planned = offsetDays * 24 * 60 + endMinutes - start;
   if (planned > 0) return planned;
   return (start + 30).clamp(0, 24 * 60) - start;
 }

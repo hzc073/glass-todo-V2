@@ -3,7 +3,9 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
+const http = require('http');
 const https = require('https');
+const zlib = require('zlib');
 const crypto = require('crypto');
 const multer = require('multer');
 const { pipeline } = require('stream');
@@ -71,6 +73,58 @@ const dbRun = (sql, params = []) => new Promise((resolve, reject) => {
 const ensureDir = (dirPath) => {
     if (!fs.existsSync(dirPath)) fs.mkdirSync(dirPath, { recursive: true });
 };
+
+const fetchText = (url, { timeoutMs = 12000, maxRedirects = 3 } = {}) => new Promise((resolve, reject) => {
+
+    const doRequest = (currentUrl, redirectsLeft) => {
+        let parsed;
+        try {
+            parsed = new URL(currentUrl);
+        } catch (e) {
+            return reject(new Error('Invalid URL'));
+        }
+
+        const client = parsed.protocol === 'http:' ? http : https;
+        const req = client.get(currentUrl, {
+            headers: {
+                'User-Agent': 'glass-todo-local',
+                'Accept': 'application/json',
+                'Accept-Encoding': 'gzip, deflate, br'
+            }
+        }, (resp) => {
+            const code = resp.statusCode || 0;
+            if ([301, 302, 303, 307, 308].includes(code) && resp.headers.location) {
+                resp.resume();
+                if (redirectsLeft <= 0) return reject(new Error('Too many redirects'));
+                const nextUrl = new URL(resp.headers.location, currentUrl).toString();
+                return doRequest(nextUrl, redirectsLeft - 1);
+            }
+            if (code !== 200) {
+                resp.resume();
+                return reject(new Error(`HTTP ${code}`));
+            }
+
+            const encoding = String(resp.headers['content-encoding'] || '').toLowerCase();
+            let stream = resp;
+            if (encoding === 'gzip') stream = resp.pipe(zlib.createGunzip());
+            else if (encoding === 'deflate') stream = resp.pipe(zlib.createInflate());
+            else if (encoding === 'br') stream = resp.pipe(zlib.createBrotliDecompress());
+
+            let data = '';
+            stream.setEncoding('utf8');
+            stream.on('data', (chunk) => { data += chunk; });
+            stream.on('end', () => resolve(data));
+            stream.on('error', (err) => reject(err));
+        });
+
+        req.setTimeout(timeoutMs, () => {
+            req.destroy(new Error('Request timeout'));
+        });
+        req.on('error', (err) => reject(err));
+    };
+
+    doRequest(url, maxRedirects);
+});
 
 const createAttachmentId = () => {
     if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
@@ -1539,6 +1593,7 @@ app.get('/api/v2/export', authenticate, async (req, res) => {
             status: row.status || 'todo',
             dueDate: row.due_date || '',
             startTime: row.start_time || '',
+            endDate: row.end_date || '',
             endTime: row.end_time || '',
             tags: parseJsonArray(row.tags_json),
             inbox: !!row.inbox,
@@ -1757,7 +1812,8 @@ app.post('/api/v2/import', authenticate, async (req, res) => {
             const status = normalizeStatus(t?.status);
             const dueDate = normalizeDateKey(t?.dueDate ?? t?.due_date);
             const startTime = String(t?.startTime ?? t?.start_time ?? '').trim();
-            const endTime = String(t?.endTime ?? t?.end_time ?? '').trim();
+            let endDate = normalizeDateKey(t?.endDate ?? t?.end_date);
+            let endTime = String(t?.endTime ?? t?.end_time ?? '').trim();
             const tags = normalizeTags(t?.tags);
             const subtasks = normalizeTaskSubtasks(t?.subtasks);
             const attachments = normalizeTaskAttachments(t?.attachments);
@@ -1768,10 +1824,40 @@ app.post('/api/v2/import', authenticate, async (req, res) => {
             const createdAt = parseIntSafe(t?.createdAt ?? t?.created_at) ?? now;
             const updatedAt = parseIntSafe(t?.updatedAt ?? t?.updated_at) ?? now;
             const deletedAt = parseIntSafe(t?.deletedAt ?? t?.deleted_at);
+
+            if (endTime.includes('+')) {
+                const plusIndex = endTime.lastIndexOf('+');
+                const rawOffset = parseIntSafe(endTime.substring(plusIndex + 1).trim()) ?? 0;
+                const offsetDays = Math.max(0, rawOffset);
+                const timePart = endTime.substring(0, plusIndex).trim();
+                endTime = timePart;
+                if (timePart === '24:00') {
+                    endTime = '00:00';
+                    if (dueDate) {
+                        endDate = toUtcDateKey(utcDayStartMs(Date.parse(`${dueDate}T00:00:00Z`) + DAY_MS * (offsetDays + 1)));
+                    }
+                } else if (dueDate && offsetDays > 0) {
+                    endDate = toUtcDateKey(utcDayStartMs(Date.parse(`${dueDate}T00:00:00Z`) + DAY_MS * offsetDays));
+                }
+            } else if (endTime === '24:00') {
+                endTime = '00:00';
+                if (dueDate) {
+                    endDate = toUtcDateKey(utcDayStartMs(Date.parse(`${dueDate}T00:00:00Z`) + DAY_MS));
+                }
+            }
+            if (!endDate && dueDate && endTime) {
+                endDate = dueDate;
+                if (startTime && endTime <= startTime) {
+                    endDate = toUtcDateKey(utcDayStartMs(Date.parse(`${dueDate}T00:00:00Z`) + DAY_MS));
+                }
+            }
+            if (dueDate && endDate && endDate < dueDate) {
+                endDate = dueDate;
+            }
             await dbRun(
                 `INSERT OR REPLACE INTO tasks_v2
-                (id, username, title, notes, status, due_date, start_time, end_time, tags_json, subtasks_json, attachments_json, inbox, priority, remind_at, repeat_rule, created_at, updated_at, deleted_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                (id, username, title, notes, status, due_date, start_time, end_date, end_time, tags_json, subtasks_json, attachments_json, inbox, priority, remind_at, repeat_rule, created_at, updated_at, deleted_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     id,
                     username,
@@ -1780,6 +1866,7 @@ app.post('/api/v2/import', authenticate, async (req, res) => {
                     status,
                     dueDate || null,
                     startTime || null,
+                    endDate || null,
                     endTime || null,
                     JSON.stringify(tags),
                     JSON.stringify(subtasks),
@@ -2396,7 +2483,7 @@ app.post('/api/change-pwd', authenticate, (req, res) => {
 });
 
 // 5. 节假日缓存
-app.get('/api/holidays/:year', authenticate, (req, res) => {
+app.get('/api/holidays/:year', authenticate, async (req, res) => {
     const year = String(req.params.year || '').trim();
     if (!/^\d{4}$/.test(year)) return res.status(400).json({ error: 'Invalid year' });
     const filePath = path.join(holidaysDir, `${year}.json`);
@@ -2404,28 +2491,47 @@ app.get('/api/holidays/:year', authenticate, (req, res) => {
         return res.sendFile(filePath);
     }
 
-    const base = process.env.HOLIDAY_JSON_URL || 'https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json';
-    const url = base.includes('{year}') ? base.replace('{year}', year) : base;
-    https.get(url, (resp) => {
-        if (resp.statusCode !== 200) {
-            resp.resume();
-            return res.status(404).json({ error: 'Holiday data not found' });
-        }
-        let data = '';
-        resp.setEncoding('utf8');
-        resp.on('data', (chunk) => data += chunk);
-        resp.on('end', () => {
-            try {
-                JSON.parse(data);
-            } catch (e) {
-                return res.status(500).json({ error: 'Invalid holiday data' });
+    const envBases = String(process.env.HOLIDAY_JSON_URL || '').trim();
+    const bases = envBases
+        ? envBases.split(',').map((item) => item.trim()).filter(Boolean)
+        : [
+            'https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json',
+            'https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master/{year}.json',
+            'https://cdn.jsdelivr.net/gh/NateScarlet/holiday-cn@master/{year}.json'
+        ];
+
+    for (const base of bases) {
+        const url = base.includes('{year}') ? base.replace('{year}', year) : base;
+        try {
+            let data = await fetchText(url);
+            data = String(data || '').replace(/^\uFEFF/, '');
+
+            let parsed = JSON.parse(data);
+            if (!parsed || typeof parsed !== 'object') throw new Error('Invalid holiday data');
+            if (Array.isArray(parsed)) {
+                parsed = { year: Number(year), days: parsed };
+            } else if (parsed && typeof parsed === 'object') {
+                if (typeof parsed.year !== 'number') parsed.year = Number(year);
+                if (!Array.isArray(parsed.days)) {
+                    if (Array.isArray(parsed.data)) parsed.days = parsed.data;
+                    else parsed.days = [];
+                }
             }
-            fs.writeFile(filePath, data, 'utf8', (err) => {
-                if (err) return res.status(500).json({ error: 'Write failed' });
-                res.type('json').send(data);
-            });
-        });
-}).on('error', () => res.status(500).json({ error: 'Fetch failed' }));
+            data = JSON.stringify(parsed, null, 4);
+
+            try {
+                fs.writeFileSync(filePath, data, 'utf8');
+            } catch (_) {
+                // Ignore caching failures (still return the fetched data).
+            }
+
+            return res.type('json').send(data);
+        } catch (e) {
+            // Try next source.
+        }
+    }
+
+    return res.status(404).json({ error: 'Holiday data not found' });
 });
 
 // --- API v2 routes ---
@@ -2438,6 +2544,7 @@ const mapTaskRow = (row = {}) => ({
     status: row.status || 'todo',
     dueDate: row.due_date || '',
     startTime: row.start_time || '',
+    endDate: row.end_date || '',
     endTime: row.end_time || '',
     tags: parseJsonArray(row.tags_json),
     inbox: !!row.inbox,
@@ -2559,7 +2666,8 @@ app.post('/api/v2/tasks', authenticate, async (req, res) => {
     const status = normalizeStatus(body.status);
     const dueDate = normalizeDateKey(body.dueDate ?? body.due_date);
     const startTime = String(body.startTime ?? body.start_time ?? '').trim();
-    const endTime = String(body.endTime ?? body.end_time ?? '').trim();
+    let endDate = normalizeDateKey(body.endDate ?? body.end_date);
+    let endTime = String(body.endTime ?? body.end_time ?? '').trim();
     const tags = normalizeTags(body.tags);
     const subtasks = normalizeTaskSubtasks(body.subtasks);
     const inbox = parseBool(body.inbox) ? 1 : 0;
@@ -2567,11 +2675,41 @@ app.post('/api/v2/tasks', authenticate, async (req, res) => {
     const remindAt = parseIntSafe(body.remindAt ?? body.remind_at);
     const repeatRule = String(body.repeatRule ?? body.repeat_rule ?? '').trim();
 
+    // Legacy compatibility: accept endTime encoded as "HH:mm+N" or "24:00" and derive endDate.
+    // Normalized storage: end_time should be "HH:mm" and end_date is the absolute date key.
+    if (endTime.includes('+')) {
+        const plusIndex = endTime.lastIndexOf('+');
+        const rawOffset = parseIntSafe(endTime.substring(plusIndex + 1).trim()) ?? 0;
+        const offsetDays = Math.max(0, rawOffset);
+        const timePart = endTime.substring(0, plusIndex).trim();
+        endTime = timePart;
+        if (timePart === '24:00') {
+            endTime = '00:00';
+            endDate = dueDate ? toUtcDateKey(utcDayStartMs(Date.parse(`${dueDate}T00:00:00Z`) + DAY_MS * (offsetDays + 1))) : endDate;
+        } else if (dueDate && offsetDays > 0) {
+            endDate = toUtcDateKey(utcDayStartMs(Date.parse(`${dueDate}T00:00:00Z`) + DAY_MS * offsetDays));
+        }
+    } else if (endTime === '24:00') {
+        endTime = '00:00';
+        if (dueDate) {
+            endDate = toUtcDateKey(utcDayStartMs(Date.parse(`${dueDate}T00:00:00Z`) + DAY_MS));
+        }
+    }
+    if (!endDate && dueDate && endTime) {
+        endDate = dueDate;
+        if (startTime && endTime <= startTime) {
+            endDate = toUtcDateKey(utcDayStartMs(Date.parse(`${dueDate}T00:00:00Z`) + DAY_MS));
+        }
+    }
+    if (dueDate && endDate && endDate < dueDate) {
+        endDate = dueDate;
+    }
+
     try {
         await dbRun(
             `INSERT INTO tasks_v2
-            (id, username, title, notes, status, due_date, start_time, end_time, tags_json, subtasks_json, attachments_json, inbox, priority, remind_at, repeat_rule, created_at, updated_at, deleted_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            (id, username, title, notes, status, due_date, start_time, end_date, end_time, tags_json, subtasks_json, attachments_json, inbox, priority, remind_at, repeat_rule, created_at, updated_at, deleted_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
                 id,
                 req.user.username,
@@ -2580,6 +2718,7 @@ app.post('/api/v2/tasks', authenticate, async (req, res) => {
                 status,
                 dueDate || null,
                 startTime || null,
+                endDate || null,
                 endTime || null,
                 JSON.stringify(tags),
                 JSON.stringify(subtasks),
@@ -2602,6 +2741,7 @@ app.post('/api/v2/tasks', authenticate, async (req, res) => {
                 status,
                 due_date: dueDate || null,
                 start_time: startTime || null,
+                end_date: endDate || null,
                 end_time: endTime || null,
                 tags_json: JSON.stringify(tags),
                 subtasks_json: JSON.stringify(subtasks),
@@ -2654,6 +2794,11 @@ app.patch('/api/v2/tasks/:id', authenticate, async (req, res) => {
         const startTime = String(body.startTime ?? body.start_time ?? '').trim();
         fields.push('start_time = ?');
         values.push(startTime || null);
+    }
+    if (body.endDate !== undefined || body.end_date !== undefined) {
+        const endDate = normalizeDateKey(body.endDate ?? body.end_date);
+        fields.push('end_date = ?');
+        values.push(endDate || null);
     }
     if (body.endTime !== undefined || body.end_time !== undefined) {
         const endTime = String(body.endTime ?? body.end_time ?? '').trim();

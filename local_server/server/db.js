@@ -30,6 +30,7 @@ db.serialize(() => {
         status TEXT NOT NULL,
         due_date TEXT,
         start_time TEXT,
+        end_date TEXT,
         end_time TEXT,
         tags_json TEXT,
         subtasks_json TEXT,
@@ -247,6 +248,51 @@ db.serialize(() => {
 
     db.all("PRAGMA table_info(tasks_v2)", (err, rows) => {
         if (!rows) return;
+        const migrateEndDate = () => {
+            // Convert legacy end_time formats (24:00 / HH:mm+N) into end_date + end_time.
+            // Only runs for rows where end_date is empty to avoid overriding newer data.
+            db.run(
+                `UPDATE tasks_v2
+                 SET end_date = date(due_date, printf('+%d day', CAST(substr(end_time, instr(end_time, '+') + 1) AS INTEGER) + 1)),
+                     end_time = '00:00'
+                 WHERE (end_date IS NULL OR trim(end_date) = '')
+                   AND due_date IS NOT NULL AND trim(due_date) != ''
+                   AND end_time LIKE '24:00+%'`
+            );
+            db.run(
+                `UPDATE tasks_v2
+                 SET end_date = date(due_date, printf('+%d day', CAST(substr(end_time, instr(end_time, '+') + 1) AS INTEGER))),
+                     end_time = substr(end_time, 1, instr(end_time, '+') - 1)
+                 WHERE (end_date IS NULL OR trim(end_date) = '')
+                   AND due_date IS NOT NULL AND trim(due_date) != ''
+                   AND end_time LIKE '%+%'`
+            );
+            db.run(
+                `UPDATE tasks_v2
+                 SET end_date = date(due_date, '+1 day'),
+                     end_time = '00:00'
+                 WHERE (end_date IS NULL OR trim(end_date) = '')
+                   AND due_date IS NOT NULL AND trim(due_date) != ''
+                   AND end_time = '24:00'`
+            );
+            db.run(
+                `UPDATE tasks_v2
+                 SET end_date = date(due_date, '+1 day')
+                 WHERE (end_date IS NULL OR trim(end_date) = '')
+                   AND due_date IS NOT NULL AND trim(due_date) != ''
+                   AND start_time IS NOT NULL AND trim(start_time) != ''
+                   AND end_time IS NOT NULL AND trim(end_time) != ''
+                   AND end_time <= start_time`
+            );
+            db.run(
+                `UPDATE tasks_v2
+                 SET end_date = due_date
+                 WHERE (end_date IS NULL OR trim(end_date) = '')
+                   AND due_date IS NOT NULL AND trim(due_date) != ''
+                   AND end_time IS NOT NULL AND trim(end_time) != ''`
+            );
+        };
+
         if (!rows.some(r => r.name === 'subtasks_json')) {
             console.log(">> DB Migration: Adding tasks_v2.subtasks_json column...");
             db.run("ALTER TABLE tasks_v2 ADD COLUMN subtasks_json TEXT");
@@ -259,6 +305,15 @@ db.serialize(() => {
             console.log(">> DB Migration: Adding tasks_v2.notified_at column...");
             db.run("ALTER TABLE tasks_v2 ADD COLUMN notified_at INTEGER");
         }
+        if (!rows.some(r => r.name === 'end_date')) {
+            console.log(">> DB Migration: Adding tasks_v2.end_date column...");
+            db.run("ALTER TABLE tasks_v2 ADD COLUMN end_date TEXT", (err2) => {
+                if (err2) return;
+                migrateEndDate();
+            });
+            return;
+        }
+        migrateEndDate();
     });
 
     db.all("PRAGMA table_info(time_activities)", (err, rows) => {

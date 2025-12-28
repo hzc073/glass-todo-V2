@@ -6,6 +6,7 @@ class Task {
     required this.status,
     required this.dueDate,
     required this.startTime,
+    required this.endDate,
     required this.endTime,
     required this.tags,
     required this.inbox,
@@ -26,6 +27,7 @@ class Task {
   final String status;
   final String dueDate;
   final String startTime;
+  final String endDate;
   final String endTime;
   final List<String> tags;
   final bool inbox;
@@ -59,6 +61,7 @@ class Task {
       status: (json['status'] ?? 'todo').toString(),
       dueDate: (json['dueDate'] ?? json['due_date'] ?? '').toString(),
       startTime: (json['startTime'] ?? json['start_time'] ?? '').toString(),
+      endDate: (json['endDate'] ?? json['end_date'] ?? '').toString(),
       endTime: (json['endTime'] ?? json['end_time'] ?? '').toString(),
       tags: _parseStringList(json['tags']),
       inbox: json['inbox'] == true || json['inbox'] == 1,
@@ -82,6 +85,7 @@ class Task {
       'status': status,
       'dueDate': dueDate,
       'startTime': startTime,
+      'endDate': endDate,
       'endTime': endTime,
       'tags': tags,
       'inbox': inbox,
@@ -103,6 +107,7 @@ class Task {
     String? status,
     String? dueDate,
     String? startTime,
+    String? endDate,
     String? endTime,
     List<String>? tags,
     bool? inbox,
@@ -121,6 +126,7 @@ class Task {
       status: status ?? this.status,
       dueDate: dueDate ?? this.dueDate,
       startTime: startTime ?? this.startTime,
+      endDate: endDate ?? this.endDate,
       endTime: endTime ?? this.endTime,
       tags: tags ?? List<String>.from(this.tags),
       inbox: inbox ?? this.inbox,

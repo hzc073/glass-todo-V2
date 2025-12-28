@@ -145,6 +145,7 @@ class ApiClient {
     String notes = '',
     String dueDate = '',
     String startTime = '',
+    String endDate = '',
     String endTime = '',
     List<String> tags = const [],
     List<TaskSubtask> subtasks = const [],
@@ -159,6 +160,7 @@ class ApiClient {
       'notes': notes,
       'dueDate': dueDate,
       'startTime': startTime,
+      'endDate': endDate,
       'endTime': endTime,
       'tags': tags,
       'subtasks': subtasks.map((item) => item.toJson()).toList(),
@@ -185,6 +187,7 @@ class ApiClient {
     String? status,
     String? dueDate,
     String? startTime,
+    String? endDate,
     String? endTime,
     List<String>? tags,
     List<TaskSubtask>? subtasks,
@@ -202,6 +205,7 @@ class ApiClient {
     if (status != null) payload['status'] = status;
     if (dueDate != null) payload['dueDate'] = dueDate;
     if (startTime != null) payload['startTime'] = startTime;
+    if (endDate != null) payload['endDate'] = endDate;
     if (endTime != null) payload['endTime'] = endTime;
     if (tags != null) payload['tags'] = tags;
     if (subtasks != null) {
@@ -340,8 +344,14 @@ class ApiClient {
   Future<ChecklistItem> createChecklistItem({
     required int listId,
     required String title,
+    String? notes,
+    int? columnId,
   }) async {
-    final payload = {'title': title};
+    final payload = <String, dynamic>{
+      'title': title,
+      if (notes != null) 'notes': notes,
+      if (columnId != null) 'columnId': columnId,
+    };
     final res = await _withTimeout(http.post(
       _uri('/api/checklists/$listId/items'),
       headers: _headers(),
@@ -448,6 +458,7 @@ class ApiClient {
     String? goal,
     String? note,
     int? deletedAt,
+    bool clearDeletedAt = false,
   }) async {
     final payload = <String, dynamic>{};
     if (name != null) payload['name'] = name;
@@ -457,7 +468,11 @@ class ApiClient {
     if (category != null) payload['category'] = category;
     if (goal != null) payload['goal'] = goal;
     if (note != null) payload['note'] = note;
-    if (deletedAt != null) payload['deletedAt'] = deletedAt;
+    if (clearDeletedAt) {
+      payload['deletedAt'] = null;
+    } else if (deletedAt != null) {
+      payload['deletedAt'] = deletedAt;
+    }
     final res = await _withTimeout(http.patch(
       _uri('/api/v2/time/activities/$id'),
       headers: _headers(),

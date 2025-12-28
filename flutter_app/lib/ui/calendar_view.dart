@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:intl/intl.dart';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import '../core/chinese_lunar.dart';
@@ -15,6 +16,59 @@ const double _hourHeight = 80;
 const double _quarterHeight = _hourHeight / 4;
 const double _blockRadius = 10;
 const double _gridPadding = 4;
+const int _maxOverlapColumns = 2;
+const double _minOverlapColumnWidth = 64;
+
+String? _buildTaskRemindLabel(Task task) {
+  final millis = task.remindAt;
+  if (millis == null) return null;
+
+  DateTime? dueDate;
+  if (task.dueDate.trim().isNotEmpty) {
+    try {
+      dueDate = DateFormat('yyyy-MM-dd').parse(task.dueDate.trim());
+    } catch (_) {
+      dueDate = null;
+    }
+  }
+
+  try {
+    final remindAt = DateTime.fromMillisecondsSinceEpoch(millis);
+    final isSameDay = dueDate != null &&
+        remindAt.year == dueDate.year &&
+        remindAt.month == dueDate.month &&
+        remindAt.day == dueDate.day;
+    return isSameDay
+        ? DateFormat('HH:mm').format(remindAt)
+        : DateFormat('M/d HH:mm').format(remindAt);
+  } catch (_) {
+    return millis.toString();
+  }
+}
+
+String? _buildTaskRepeatLabel(String raw) {
+  final trimmed = raw.trim();
+  if (trimmed.isEmpty) return null;
+  try {
+    final decoded = jsonDecode(trimmed);
+    if (decoded is! Map) return '重复';
+    final freq = decoded['freq']?.toString() ?? '';
+    switch (freq) {
+      case 'daily':
+        return '每天';
+      case 'weekly':
+        return '每周';
+      case 'monthly':
+        return '每月';
+      case 'yearly':
+        return '每年';
+      default:
+        return '重复';
+    }
+  } catch (_) {
+    return '重复';
+  }
+}
 
 enum CalendarMode { day, week, month }
 
@@ -61,6 +115,8 @@ class CalendarView extends StatefulWidget {
 
 class _CalendarViewState extends State<CalendarView> {
   static final DateFormat _dateFormatter = DateFormat('yyyy-MM-dd');
+  static const int _weekCompactDayCount = 3;
+  static const int _weekCompactInitialPage = 10000;
   static final DateFormat _dayLabelFormatter = DateFormat('M月d日 EEE');
   static final DateFormat _monthLabelFormatter = DateFormat('yyyy年M月');
 
@@ -68,6 +124,14 @@ class _CalendarViewState extends State<CalendarView> {
   DateTime _focusDate = _stripTime(DateTime.now());
 
   final ScrollController _timelineScroll = ScrollController();
+  final ScrollController _weekHeaderScroll = ScrollController();
+  final ScrollController _weekGridScroll = ScrollController();
+  late final PageController _weekCompactPageController =
+      PageController(initialPage: _weekCompactInitialPage);
+  DateTime _weekCompactBaseStart =
+      _stripTime(DateTime.now()).subtract(const Duration(days: 1));
+  int _weekCompactPage = _weekCompactInitialPage;
+  bool _syncingWeekScroll = false;
   bool _didAutoJumpToDefaultTimeline = false;
 
   final Map<int, Map<String, HolidayCnDay>> _holidayByYear = {};
@@ -78,6 +142,12 @@ class _CalendarViewState extends State<CalendarView> {
   void initState() {
     super.initState();
     _mode = widget.initialMode;
+    _weekHeaderScroll.addListener(() {
+      _syncWeekHorizontal(source: _weekHeaderScroll, target: _weekGridScroll);
+    });
+    _weekGridScroll.addListener(() {
+      _syncWeekHorizontal(source: _weekGridScroll, target: _weekHeaderScroll);
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _autoJumpToDefaultTimeline();
@@ -100,7 +170,51 @@ class _CalendarViewState extends State<CalendarView> {
   @override
   void dispose() {
     _timelineScroll.dispose();
+    _weekHeaderScroll.dispose();
+    _weekGridScroll.dispose();
+    _weekCompactPageController.dispose();
     super.dispose();
+  }
+
+  void _syncWeekHorizontal({
+    required ScrollController source,
+    required ScrollController target,
+  }) {
+    if (_syncingWeekScroll) return;
+    if (!source.hasClients || !target.hasClients) return;
+    final offset = source.offset;
+    final current = target.offset;
+    if ((current - offset).abs() < 0.5) return;
+    final max = target.position.maxScrollExtent;
+    _syncingWeekScroll = true;
+    target.jumpTo(offset.clamp(0.0, max));
+    _syncingWeekScroll = false;
+  }
+
+  bool _isCompactWeek(double width) => width < 720;
+
+  DateTime _weekCompactStartForPage(int page) {
+    final delta = page - _weekCompactInitialPage;
+    return _weekCompactBaseStart
+        .add(Duration(days: delta * _weekCompactDayCount));
+  }
+
+  void _resetWeekCompactPager(DateTime center) {
+    _weekCompactBaseStart =
+        _stripTime(center).subtract(const Duration(days: 1));
+    _weekCompactPage = _weekCompactInitialPage;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (!_weekCompactPageController.hasClients) return;
+      _weekCompactPageController.jumpToPage(_weekCompactInitialPage);
+    });
+  }
+
+  String _compactRangeLabel(DateTime center) {
+    final start = _stripTime(center).subtract(const Duration(days: 1));
+    final end = start.add(const Duration(days: 2));
+    final fmt = DateFormat('M/d');
+    return '${fmt.format(start)}–${fmt.format(end)}';
   }
 
   @override
@@ -134,17 +248,19 @@ class _CalendarViewState extends State<CalendarView> {
       _mode == CalendarMode.week,
       _mode == CalendarMode.month,
     ];
-    final rangeLabel = switch (_mode) {
-      CalendarMode.day => _dayLabelFormatter.format(_focusDate),
-      CalendarMode.week => _weekLabel(_focusDate),
-      CalendarMode.month => _monthLabelFormatter.format(_focusDate),
-    };
 
     void setMode(CalendarMode mode) {
+      final today = _stripTime(DateTime.now());
       setState(() {
         _mode = mode;
+        if (mode == CalendarMode.week) {
+          _focusDate = today;
+        }
         _prefetchHolidaysForVisibleRange();
       });
+      if (mode == CalendarMode.week) {
+        _resetWeekCompactPager(today);
+      }
       if ((mode == CalendarMode.day || mode == CalendarMode.week) &&
           !_didAutoJumpToDefaultTimeline) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -155,10 +271,14 @@ class _CalendarViewState extends State<CalendarView> {
     }
 
     void goToday() {
+      final today = _stripTime(DateTime.now());
       setState(() {
-        _focusDate = _stripTime(DateTime.now());
+        _focusDate = today;
         _prefetchHolidaysForVisibleRange();
       });
+      if (_mode == CalendarMode.week) {
+        _resetWeekCompactPager(today);
+      }
     }
 
     final modeToggle = ToggleButtons(
@@ -174,39 +294,75 @@ class _CalendarViewState extends State<CalendarView> {
       ],
     );
 
-    final navRow = Row(
-      children: [
-        IconButton(
-          onPressed: widget.saving ? null : _goPrev,
-          icon: const Icon(Icons.chevron_left),
-          tooltip: '上一页',
-        ),
-        Expanded(
-          child: Text(
-            rangeLabel,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: Theme.of(context)
-                .textTheme
-                .titleMedium
-                ?.copyWith(fontWeight: FontWeight.w700),
-          ),
-        ),
-        IconButton(
-          onPressed: widget.saving ? null : _goNext,
-          icon: const Icon(Icons.chevron_right),
-          tooltip: '下一页',
-        ),
-        const SizedBox(width: 8),
-        TextButton(
-          onPressed: widget.saving ? null : goToday,
-          child: const Text('今天'),
-        ),
-      ],
-    );
-
     return LayoutBuilder(
       builder: (context, constraints) {
+        final compactWeek =
+            _mode == CalendarMode.week && _isCompactWeek(constraints.maxWidth);
+        final rangeLabel = switch (_mode) {
+          CalendarMode.day => _dayLabelFormatter.format(_focusDate),
+          CalendarMode.week => compactWeek
+              ? _compactRangeLabel(_focusDate)
+              : _weekLabel(_focusDate),
+          CalendarMode.month => _monthLabelFormatter.format(_focusDate),
+        };
+
+        void moveCompactWeekPage(int delta) {
+          if (!_weekCompactPageController.hasClients) return;
+          final next = (_weekCompactPage + delta).clamp(0, 999999);
+          _weekCompactPageController.animateToPage(
+            next,
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOutCubic,
+          );
+        }
+
+        final navRow = Row(
+          children: [
+            IconButton(
+              onPressed: widget.saving
+                  ? null
+                  : () {
+                      if (compactWeek) {
+                        moveCompactWeekPage(-1);
+                        return;
+                      }
+                      _goPrev();
+                    },
+              icon: const Icon(Icons.chevron_left),
+              tooltip: '上一页',
+            ),
+            Expanded(
+              child: Text(
+                rangeLabel,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context)
+                    .textTheme
+                    .titleMedium
+                    ?.copyWith(fontWeight: FontWeight.w700),
+              ),
+            ),
+            IconButton(
+              onPressed: widget.saving
+                  ? null
+                  : () {
+                      if (compactWeek) {
+                        moveCompactWeekPage(1);
+                        return;
+                      }
+                      _goNext();
+                    },
+              icon: const Icon(Icons.chevron_right),
+              tooltip: '下一页',
+            ),
+            const SizedBox(width: 8),
+            TextButton(
+              onPressed: widget.saving ? null : goToday,
+              child: const Text('今天'),
+            ),
+          ],
+        );
+
         final isNarrow = constraints.maxWidth < 520;
         if (!isNarrow) {
           return Row(
@@ -275,37 +431,48 @@ class _CalendarViewState extends State<CalendarView> {
   }
 
   Widget _buildWeekView(BuildContext context, DateTime focus) {
-    final start = _weekStart(focus);
-    final days = List.generate(7, (i) => start.add(Duration(days: i)));
-    final tasksByDayKey = <String, List<Task>>{};
-    for (final task in widget.tasks) {
-      if (task.deletedAt != null) continue;
-      final key = task.dueDate.trim();
-      if (key.isEmpty) continue;
-      tasksByDayKey.putIfAbsent(key, () => []).add(task);
-    }
+    final timedTasks = widget.tasks
+        .where((task) =>
+            task.deletedAt == null &&
+            _parseTimeToMinutes(task.startTime) != null)
+        .toList();
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final computedWidth = (constraints.maxWidth - _axisWidth) / 7;
-        final minWidth = constraints.maxWidth < 720 ? 112.0 : computedWidth;
-        final dayWidth = computedWidth < minWidth ? minWidth : computedWidth;
-        final needsHorizontalScroll =
-            _axisWidth + dayWidth * days.length > constraints.maxWidth + 0.5;
+        final isCompact = _isCompactWeek(constraints.maxWidth);
+        if (isCompact) {
+          final start = _weekCompactStartForPage(_weekCompactPage);
+          final days =
+              List.generate(_weekCompactDayCount, (i) => start.add(Duration(days: i)));
+          final availableWidth = (constraints.maxWidth - _axisWidth)
+              .clamp(0.0, double.infinity)
+              .toDouble();
+          final dayWidth =
+              (availableWidth / _weekCompactDayCount).clamp(0.0, availableWidth).toDouble();
+          final gridHeight = _hourHeight * 24;
 
-        Widget maybeScroll(Widget child) {
-          if (!needsHorizontalScroll) return child;
-          return SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: child,
-          );
-        }
+          void handlePageSwipe(DragEndDetails details) {
+            if (!_weekCompactPageController.hasClients) return;
+            final velocity = details.primaryVelocity ?? 0;
+            if (velocity.abs() < 250) return;
+            if (velocity < 0) {
+              _weekCompactPageController.nextPage(
+                duration: const Duration(milliseconds: 220),
+                curve: Curves.easeOutCubic,
+              );
+              return;
+            }
+            _weekCompactPageController.previousPage(
+              duration: const Duration(milliseconds: 220),
+              curve: Curves.easeOutCubic,
+            );
+          }
 
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            maybeScroll(
-              Row(
+          Widget buildHeader() {
+            return GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onHorizontalDragEnd: handlePageSwipe,
+              child: Row(
                 children: [
                   const SizedBox(width: _axisWidth),
                   for (final day in days)
@@ -335,10 +502,14 @@ class _CalendarViewState extends State<CalendarView> {
                     ),
                 ],
               ),
-            ),
-            const SizedBox(height: 10),
-            maybeScroll(
-              Row(
+            );
+          }
+
+          Widget buildAllDayRow() {
+            return GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onHorizontalDragEnd: handlePageSwipe,
+              child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const SizedBox(width: _axisWidth),
@@ -347,8 +518,7 @@ class _CalendarViewState extends State<CalendarView> {
                       width: dayWidth,
                       child: _AllDayCell(
                         date: day,
-                        tasks: (tasksByDayKey[_dateFormatter.format(day)] ??
-                                const [])
+                        tasks: _tasksForDate(day)
                             .where(
                                 (t) => _parseTimeToMinutes(t.startTime) == null)
                             .toList(),
@@ -360,20 +530,184 @@ class _CalendarViewState extends State<CalendarView> {
                     ),
                 ],
               ),
+            );
+          }
+
+          final timeline = Expanded(
+            child: SingleChildScrollView(
+              controller: _timelineScroll,
+              child: SizedBox(
+                height: gridHeight,
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SizedBox(
+                      width: _axisWidth,
+                      height: gridHeight,
+                      child: const _TimeAxisColumn(),
+                    ),
+                    Expanded(
+                      child: SizedBox(
+                        height: gridHeight,
+                        child: PageView.builder(
+                          controller: _weekCompactPageController,
+                          onPageChanged: (page) {
+                            final pageStart = _weekCompactStartForPage(page);
+                            final center =
+                                pageStart.add(const Duration(days: 1));
+                            setState(() {
+                              _weekCompactPage = page;
+                              _focusDate = _stripTime(center);
+                              _prefetchHolidaysForVisibleRange();
+                            });
+                          },
+                          itemBuilder: (context, pageIndex) {
+                            final pageStart =
+                                _weekCompactStartForPage(pageIndex);
+                            final pageDays = List.generate(_weekCompactDayCount,
+                                (i) => pageStart.add(Duration(days: i)));
+
+                            return SizedBox(
+                              width: availableWidth,
+                              height: gridHeight,
+                              child: _TimeGrid(
+                                dayCount: _weekCompactDayCount,
+                                dayWidth: dayWidth,
+                                dayForIndex: (i) => pageDays[i],
+                                tasks: timedTasks,
+                                showTaskStartTime:
+                                    widget.settings.taskBlockShowStartTimeWeek,
+                                showTaskTags:
+                                    widget.settings.taskBlockShowTagsWeek,
+                                onTapSlot: widget.saving
+                                    ? null
+                                    : (d, time) => _promptCreateTask(d, time),
+                                onDropTask:
+                                    widget.saving ? null : _rescheduleTask,
+                                onResizeTask:
+                                    widget.saving ? null : _rescheduleTaskRange,
+                                onToggleTask:
+                                    widget.saving ? null : widget.onToggleTask,
+                                onOpenTask: widget.onOpenTask,
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
+          );
+
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              buildHeader(),
+              const SizedBox(height: 10),
+              buildAllDayRow(),
+              const SizedBox(height: 10),
+              timeline,
+            ],
+          );
+        }
+
+        final start = _weekStart(focus);
+        final days = List.generate(7, (i) => start.add(Duration(days: i)));
+        final computedWidth = (constraints.maxWidth - _axisWidth)
+                .clamp(0.0, double.infinity) /
+            7.0;
+        final dayWidth = computedWidth.isFinite && computedWidth > 0
+            ? computedWidth
+            : 1.0;
+        final stripWidth = dayWidth * days.length;
+
+        final headerStrip = Row(
+          children: [
+            const SizedBox(width: _axisWidth),
+            Expanded(
+              child: SingleChildScrollView(
+                controller: _weekHeaderScroll,
+                scrollDirection: Axis.horizontal,
+                child: SizedBox(
+                  width: stripWidth,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          for (final day in days)
+                            SizedBox(
+                              width: dayWidth,
+                              child: _WeekDayHeader(
+                                date: day,
+                                lunarLabel: ChineseLunar.format(day),
+                                holiday: _holidayFor(day),
+                                onTap: widget.saving
+                                    ? null
+                                    : () {
+                                        setState(() {
+                                          _focusDate = day;
+                                          _mode = CalendarMode.day;
+                                          _prefetchHolidaysForVisibleRange();
+                                        });
+                                        if (!_didAutoJumpToDefaultTimeline) {
+                                          WidgetsBinding.instance
+                                              .addPostFrameCallback((_) {
+                                            if (!mounted) return;
+                                            _autoJumpToDefaultTimeline();
+                                          });
+                                        }
+                                      },
+                              ),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          for (final day in days)
+                            SizedBox(
+                              width: dayWidth,
+                              child: _AllDayCell(
+                                date: day,
+                                tasks: _tasksForDate(day)
+                                    .where((t) =>
+                                        _parseTimeToMinutes(t.startTime) ==
+                                        null)
+                                    .toList(),
+                                onCreate: widget.saving
+                                    ? null
+                                    : () => _promptCreateTask(day, null),
+                                onReschedule:
+                                    widget.saving ? null : _rescheduleTask,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            headerStrip,
             const SizedBox(height: 10),
             Expanded(
               child: _TimelineView(
                 scrollController: _timelineScroll,
+                horizontalController: _weekGridScroll,
                 dayCount: 7,
                 dayWidth: dayWidth,
                 dayForIndex: (i) => days[i],
-                tasks: [
-                  for (final day in days)
-                    ...((tasksByDayKey[_dateFormatter.format(day)] ?? const [])
-                        .where(
-                            (t) => _parseTimeToMinutes(t.startTime) != null)),
-                ],
+                tasks: timedTasks,
                 showTaskStartTime: widget.settings.taskBlockShowStartTimeWeek,
                 showTaskTags: widget.settings.taskBlockShowTagsWeek,
                 onTapSlot: widget.saving
@@ -401,19 +735,16 @@ class _CalendarViewState extends State<CalendarView> {
         weekRowCount * 7, (i) => gridStart.add(Duration(days: i)));
 
     final tasksByDayKey = <String, List<Task>>{};
-    for (final task in widget.tasks) {
-      if (task.deletedAt != null) continue;
-      final key = task.dueDate.trim();
-      if (key.isEmpty) continue;
-      tasksByDayKey.putIfAbsent(key, () => []).add(task);
+    for (final date in days) {
+      tasksByDayKey[_dateFormatter.format(date)] = _tasksForDate(date);
     }
 
     return LayoutBuilder(
       builder: (context, constraints) {
         const headerHeight = 20.0;
-        const headerGap = 3.0;
-        const mainSpacing = 2.0;
-        const crossSpacing = 3.0;
+        const headerGap = 0.0;
+        const mainSpacing = 0.0;
+        const crossSpacing = 0.0;
         final rowCount = weekRowCount;
 
         final gridHeight = (constraints.maxHeight - headerHeight - headerGap)
@@ -458,7 +789,6 @@ class _CalendarViewState extends State<CalendarView> {
                 itemBuilder: (context, index) {
                   final date = days[index];
                   final isInMonth = date.month == focus.month;
-                  if (!isInMonth) return const SizedBox.expand();
                   final key = _dateFormatter.format(date);
                   final orderedTasks =
                       _sortedMonthTasks(key, tasksByDayKey[key] ?? const []);
@@ -506,45 +836,52 @@ class _CalendarViewState extends State<CalendarView> {
   }
 
   Future<void> _promptCreateTask(DateTime date, TimeOfDay? time) async {
-    final controller = TextEditingController();
     final label = time == null ? '全天' : time.format(context);
     String draft = '';
     final title = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text('添加任务 · $label'),
-        content: StatefulBuilder(
-          builder: (context, setState) => TextField(
-            controller: controller,
-            autofocus: true,
-            decoration: InputDecoration(
-              hintText: '任务标题',
-              helperText: '必填',
-              errorText:
-                  draft.isNotEmpty && draft.trim().isEmpty ? '请输入任务标题' : null,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setState) {
+          void submit() {
+            final trimmed = draft.trim();
+            if (trimmed.isEmpty) return;
+            Navigator.of(dialogContext).pop(trimmed);
+          }
+
+          return AlertDialog(
+            title: Text('添加任务 · $label'),
+            content: TextField(
+              autofocus: true,
+              decoration: InputDecoration(
+                hintText: '任务标题',
+                helperText: '必填',
+                errorText: draft.isNotEmpty && draft.trim().isEmpty
+                    ? '请输入任务标题'
+                    : null,
+              ),
+              onChanged: (value) => setState(() => draft = value),
+              onSubmitted: (_) => submit(),
             ),
-            onChanged: (value) => setState(() => draft = value),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('取消'),
-          ),
-          ElevatedButton(
-            onPressed: draft.trim().isEmpty
-                ? null
-                : () => Navigator.of(context).pop(controller.text),
-            child: const Text('添加'),
-          ),
-        ],
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('取消'),
+              ),
+              ElevatedButton(
+                onPressed: draft.trim().isEmpty ? null : submit,
+                child: const Text('添加'),
+              ),
+            ],
+          );
+        },
       ),
     );
-    controller.dispose();
     if (!mounted) return;
     if (title == null) return;
     final trimmed = title.trim();
     if (trimmed.isEmpty) return;
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return;
     await widget.onCreateTask(title: trimmed, date: date, startTime: time);
   }
 
@@ -608,10 +945,68 @@ class _CalendarViewState extends State<CalendarView> {
   }
 
   List<Task> _tasksForDate(DateTime date) {
-    final key = _dateFormatter.format(date);
-    return widget.tasks
-        .where((task) => task.deletedAt == null && task.dueDate.trim() == key)
-        .toList();
+    final day = DateTime(date.year, date.month, date.day);
+    final key = _dateFormatter.format(day);
+    final result = <Task>[];
+    for (final task in widget.tasks) {
+      if (task.deletedAt != null) continue;
+      final startDay = _tryParseDayKey(task.dueDate.trim());
+      if (startDay == null) continue;
+      final startDayKey = _dateFormatter.format(startDay);
+
+      final startMinutes = _parseTimeToMinutes(task.startTime);
+      if (startMinutes == null) {
+        final endDayParsed = _tryParseDayKey(task.endDate.trim()) ?? startDay;
+        final endDay = endDayParsed.isBefore(startDay) ? startDay : endDayParsed;
+        if (!day.isBefore(startDay) && !day.isAfter(endDay)) {
+          result.add(task);
+        }
+        continue;
+      }
+
+      if (startDayKey == key) {
+        result.add(task);
+        continue;
+      }
+
+      final rawEnd = task.endTime.trim();
+      if (rawEnd.isEmpty) continue;
+      var endMinutesOfDay = _parseTimeToMinutes(rawEnd);
+      if (endMinutesOfDay == null) continue;
+      var extraOffsetDays = 0;
+      if (endMinutesOfDay == 24 * 60) {
+        endMinutesOfDay = 0;
+        extraOffsetDays = 1;
+      }
+
+      int offsetDays = 0;
+      final endDateKey = task.endDate.trim();
+      if (endDateKey.isNotEmpty) {
+        final parsedEndDay = _tryParseDayKey(endDateKey);
+        if (parsedEndDay != null) {
+          offsetDays = parsedEndDay.difference(startDay).inDays;
+        }
+      } else {
+        offsetDays = _parseOffsetDays(rawEnd);
+      }
+      if (offsetDays < 0) offsetDays = 0;
+      offsetDays += extraOffsetDays;
+      if (offsetDays == 0 && endMinutesOfDay <= startMinutes) {
+        offsetDays = 1;
+      }
+      if (offsetDays <= 0) continue;
+
+      final endDay = startDay.add(Duration(days: offsetDays));
+      final isEndDay = day.year == endDay.year &&
+          day.month == endDay.month &&
+          day.day == endDay.day;
+      final overlaps = day.isAfter(startDay) &&
+          (day.isBefore(endDay) || (isEndDay && endMinutesOfDay > 0));
+      if (overlaps) {
+        result.add(task);
+      }
+    }
+    return result;
   }
 
   int _monthTaskSort(Task a, Task b) {
@@ -1022,7 +1417,7 @@ class _TaskDragPayload {
   final Task task;
 }
 
-class _TimelineView extends StatelessWidget {
+class _TimelineView extends StatefulWidget {
   const _TimelineView({
     required this.scrollController,
     required this.dayCount,
@@ -1033,12 +1428,14 @@ class _TimelineView extends StatelessWidget {
     required this.showTaskTags,
     required this.onTapSlot,
     required this.onDropTask,
+    this.horizontalController,
     this.onResizeTask,
     this.onToggleTask,
     this.onOpenTask,
   });
 
   final ScrollController scrollController;
+  final ScrollController? horizontalController;
   final int dayCount;
   final double? dayWidth;
   final DateTime Function(int index) dayForIndex;
@@ -1054,13 +1451,60 @@ class _TimelineView extends StatelessWidget {
   final void Function(Task task)? onOpenTask;
 
   @override
+  State<_TimelineView> createState() => _TimelineViewState();
+}
+
+class _TimelineViewState extends State<_TimelineView> {
+  final ScrollController _internalHorizontal = ScrollController();
+
+  ScrollController get _horizontal =>
+      widget.horizontalController ?? _internalHorizontal;
+
+  @override
+  void dispose() {
+    _internalHorizontal.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final availableWidth = constraints.maxWidth - _axisWidth;
-        final effectiveDayWidth = dayWidth ?? (availableWidth / dayCount);
-        final gridWidth = effectiveDayWidth * dayCount;
+        final availableWidth = (constraints.maxWidth - _axisWidth)
+            .clamp(0.0, double.infinity)
+            .toDouble();
+        final effectiveDayWidth =
+            widget.dayWidth ?? (availableWidth / widget.dayCount);
+        final gridWidth = effectiveDayWidth * widget.dayCount;
         final gridHeight = _hourHeight * 24;
+
+        final needsHorizontalScroll = gridWidth > availableWidth + 0.5;
+        final grid = SizedBox(
+          width: gridWidth,
+          height: gridHeight,
+          child: _TimeGrid(
+            dayCount: widget.dayCount,
+            dayWidth: effectiveDayWidth,
+            dayForIndex: widget.dayForIndex,
+            tasks: widget.tasks,
+            showTaskStartTime: widget.showTaskStartTime,
+            showTaskTags: widget.showTaskTags,
+            onTapSlot: widget.onTapSlot,
+            onDropTask: widget.onDropTask,
+            onResizeTask: widget.onResizeTask,
+            onToggleTask: widget.onToggleTask,
+            onOpenTask: widget.onOpenTask,
+          ),
+        );
+
+        final scrollableGrid = needsHorizontalScroll
+            ? SingleChildScrollView(
+                controller: _horizontal,
+                scrollDirection: Axis.horizontal,
+                child: grid,
+              )
+            : grid;
+
         final content = SizedBox(
           height: gridHeight,
           child: Row(
@@ -1071,42 +1515,19 @@ class _TimelineView extends StatelessWidget {
                 height: gridHeight,
                 child: const _TimeAxisColumn(),
               ),
-              SizedBox(
-                width: gridWidth,
-                height: gridHeight,
-                child: _TimeGrid(
-                  dayCount: dayCount,
-                  dayWidth: effectiveDayWidth,
-                  dayForIndex: dayForIndex,
-                  tasks: tasks,
-                  showTaskStartTime: showTaskStartTime,
-                  showTaskTags: showTaskTags,
-                  onTapSlot: onTapSlot,
-                  onDropTask: onDropTask,
-                  onResizeTask: onResizeTask,
-                  onToggleTask: onToggleTask,
-                  onOpenTask: onOpenTask,
+              Expanded(
+                child: SizedBox(
+                  height: gridHeight,
+                  child: scrollableGrid,
                 ),
               ),
             ],
           ),
         );
 
-        final vertical = SingleChildScrollView(
-          controller: scrollController,
-          child: content,
-        );
-
-        final needsHorizontalScroll =
-            _axisWidth + gridWidth > constraints.maxWidth + 0.5;
-        if (!needsHorizontalScroll) return vertical;
-
         return SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: SizedBox(
-            width: _axisWidth + gridWidth,
-            child: vertical,
-          ),
+          controller: widget.scrollController,
+          child: content,
         );
       },
     );
@@ -1186,6 +1607,103 @@ class _TimeGridState extends State<_TimeGrid> {
   final Map<String, _TimeRangeOverride> _overrides =
       <String, _TimeRangeOverride>{};
 
+  String _formatMinutes(int minutes) {
+    minutes = minutes.clamp(0, 24 * 60);
+    final hour = minutes ~/ 60;
+    final minute = minutes % 60;
+    return '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
+  }
+
+  void _openOverlappingTasksSheet(
+    DateTime date,
+    int startMinutes,
+    int endMinutes,
+    List<Task> tasks,
+  ) {
+    if (tasks.isEmpty) return;
+    final sheetTasks = List<Task>.from(tasks);
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        final maxHeight = MediaQuery.of(sheetContext).size.height * 0.75;
+        final title = DateFormat('yyyy-MM-dd').format(date);
+        final rangeLabel =
+            '${_formatMinutes(startMinutes)}-${_formatMinutes(endMinutes)}';
+
+        return StatefulBuilder(
+          builder: (sheetContext, setSheetState) {
+            Future<void> handleToggle(Task task) async {
+              final idx = sheetTasks.indexWhere((t) => t.id == task.id);
+              if (idx < 0) return;
+              final current = sheetTasks[idx];
+              setSheetState(() {
+                sheetTasks[idx] = current.copyWith(
+                  status: current.isCompleted ? 'todo' : 'completed',
+                );
+              });
+              if (widget.onToggleTask != null) {
+                await widget.onToggleTask!(current);
+              }
+            }
+
+            return SafeArea(
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+                ),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(maxHeight: maxHeight),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '$title  $rangeLabel  (${sheetTasks.length})',
+                        style: Theme.of(sheetContext)
+                            .textTheme
+                            .titleMedium
+                            ?.copyWith(fontWeight: FontWeight.w800),
+                      ),
+                      const SizedBox(height: 12),
+                      Expanded(
+                        child: ListView.builder(
+                          itemCount: sheetTasks.length,
+                          itemBuilder: (context, index) {
+                            final task = sheetTasks[index];
+                            return _MonthTaskTile(
+                              key: ValueKey(task.id),
+                              task: task,
+                              showStartTime: widget.showTaskStartTime,
+                              showTags: widget.showTaskTags,
+                              onTap: widget.onOpenTask == null
+                                  ? null
+                                  : () {
+                                      Navigator.of(sheetContext).pop();
+                                      WidgetsBinding.instance
+                                          .addPostFrameCallback((_) {
+                                        widget.onOpenTask?.call(task);
+                                      });
+                                    },
+                              onToggle: widget.onToggleTask == null
+                                  ? null
+                                  : () => handleToggle(task),
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   @override
   void didUpdateWidget(covariant _TimeGrid oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -1230,29 +1748,99 @@ class _TimeGridState extends State<_TimeGrid> {
     final eventsByDay =
         List.generate(widget.dayCount, (_) => <_TimelineEvent>[]);
     for (final task in widget.tasks) {
-      final dayIndex = dateIndexByKey[task.dueDate.trim()];
-      if (dayIndex == null) continue;
-
       final override = _overrides[task.id];
       final startMinutes =
           override?.startMinutes ?? _parseTimeToMinutes(task.startTime);
       if (startMinutes == null || startMinutes >= 24 * 60) continue;
 
-      var endMinutes =
-          override?.endMinutes ?? _parseEndMinutes(task, startMinutes);
-      endMinutes = endMinutes.clamp(startMinutes + 15, 24 * 60).toInt();
+      final dueKey = task.dueDate.trim();
+      final rawEnd = task.endTime.trim();
+      final hasEndTime = rawEnd.isNotEmpty;
+      final endDateKey = task.endDate.trim();
+      final startDate = _tryParseDayKey(dueKey);
+      if (startDate == null) continue;
 
-      eventsByDay[dayIndex].add(
-        _TimelineEvent(
-          task: task,
-          startMinutes: startMinutes,
-          endMinutes: endMinutes,
-        ),
-      );
+      var endMinutesOfDay = _parseTimeToMinutes(rawEnd);
+      var extraOffsetDays = 0;
+      if (endMinutesOfDay != null && endMinutesOfDay == 24 * 60) {
+        endMinutesOfDay = 0;
+        extraOffsetDays = 1;
+      }
+
+      int offsetDays = 0;
+      if (hasEndTime) {
+        if (endDateKey.isNotEmpty) {
+          final parsedEndDay = _tryParseDayKey(endDateKey);
+          if (parsedEndDay != null) {
+            offsetDays = parsedEndDay.difference(startDate).inDays;
+          } else {
+            offsetDays = _parseOffsetDays(rawEnd);
+          }
+        } else {
+          offsetDays = _parseOffsetDays(rawEnd);
+        }
+        offsetDays = offsetDays < 0 ? 0 : offsetDays;
+        offsetDays += extraOffsetDays;
+      }
+
+      final impliedCrossDay = hasEndTime &&
+          offsetDays == 0 &&
+          endMinutesOfDay != null &&
+          endMinutesOfDay <= startMinutes;
+      final effectiveOffsetDays = hasEndTime
+          ? (offsetDays > 0 ? offsetDays : (impliedCrossDay ? 1 : 0))
+          : 0;
+      final crossesDay = override == null && effectiveOffsetDays > 0;
+      final allowResize = !crossesDay;
+
+      final baseEndMinutes = override?.endMinutes ??
+          (crossesDay
+              ? 24 * 60
+              : (hasEndTime && endMinutesOfDay != null && endMinutesOfDay > startMinutes
+                  ? endMinutesOfDay
+                  : (startMinutes + 30).clamp(0, 24 * 60)));
+
+      final startDayIndex = dateIndexByKey[dueKey];
+      if (startDayIndex != null) {
+        final minEnd = math.min(startMinutes + 15, 24 * 60);
+        final endMinutes = baseEndMinutes.clamp(minEnd, 24 * 60).toInt();
+        eventsByDay[startDayIndex].add(
+          _TimelineEvent(
+            task: task,
+            startMinutes: startMinutes,
+            endMinutes: endMinutes,
+            allowResize: allowResize,
+          ),
+        );
+      }
+
+      if (!crossesDay) continue;
+      final finalEndMinutes = (endMinutesOfDay ?? 0).clamp(0, 24 * 60).toInt();
+      if (finalEndMinutes <= 0) continue;
+
+      for (var dayOffset = 1; dayOffset <= effectiveOffsetDays; dayOffset++) {
+        final dayKey = _CalendarViewState._dateFormatter
+            .format(startDate.add(Duration(days: dayOffset)));
+        final dayIndex = dateIndexByKey[dayKey];
+        if (dayIndex == null) continue;
+        final segmentEnd =
+            dayOffset == effectiveOffsetDays ? finalEndMinutes : 24 * 60;
+        if (segmentEnd <= 0) continue;
+        final endMinutes = segmentEnd.clamp(15, 24 * 60).toInt();
+        eventsByDay[dayIndex].add(
+          _TimelineEvent(
+            task: task,
+            startMinutes: 0,
+            endMinutes: endMinutes,
+            allowResize: false,
+          ),
+        );
+      }
     }
 
     const columnGap = 2.0;
-    final layout = <_TaskLayout>[];
+    final taskLayout = <_TaskLayout>[];
+    final moreLayout = <_OverlapMoreLayout>[];
     for (var dayIndex = 0; dayIndex < widget.dayCount; dayIndex++) {
       final dayEvents = eventsByDay[dayIndex];
       if (dayEvents.isEmpty) continue;
@@ -1313,16 +1901,64 @@ class _TimeGridState extends State<_TimeGrid> {
         final width =
             (available / columnCount).clamp(0.0, double.infinity).toDouble();
 
+        final shouldCollapse =
+            columnCount > _maxOverlapColumns && width < _minOverlapColumnWidth;
+        if (!shouldCollapse) {
+          for (final placement in placed) {
+            final event = placement.event;
+            final top = (event.startMinutes / 15) * _quarterHeight;
+            final duration =
+                (event.endMinutes - event.startMinutes).clamp(15, 24 * 60);
+            final height = (duration / 15) * _quarterHeight;
+            final left = dayIndex * widget.dayWidth +
+                _gridPadding +
+                placement.columnIndex * (width + columnGap);
+            taskLayout.add(
+              _TaskLayout(
+                task: event.task,
+                date: dayDate,
+                startMinutes: event.startMinutes,
+                endMinutes: event.endMinutes,
+                left: left,
+                top: top,
+                width: width,
+                height: height,
+                allowResize: event.allowResize,
+              ),
+            );
+          }
+          continue;
+        }
+
+        final collapsedAvailable =
+            (widget.dayWidth - _gridPadding * 2 - columnGap * 1)
+                .clamp(0.0, double.infinity);
+        final collapsedWidth =
+            (collapsedAvailable / _maxOverlapColumns)
+                .clamp(0.0, double.infinity)
+                .toDouble();
+
+        final hiddenTasks = <Task>[];
+        var hiddenStart = 24 * 60;
+        var hiddenEnd = 0;
+
         for (final placement in placed) {
           final event = placement.event;
+          if (placement.columnIndex >= _maxOverlapColumns) {
+            hiddenTasks.add(event.task);
+            hiddenStart = math.min(hiddenStart, event.startMinutes);
+            hiddenEnd = math.max(hiddenEnd, event.endMinutes);
+            continue;
+          }
+
           final top = (event.startMinutes / 15) * _quarterHeight;
           final duration =
               (event.endMinutes - event.startMinutes).clamp(15, 24 * 60);
           final height = (duration / 15) * _quarterHeight;
           final left = dayIndex * widget.dayWidth +
               _gridPadding +
-              placement.columnIndex * (width + columnGap);
-          layout.add(
+              placement.columnIndex * (collapsedWidth + columnGap);
+          taskLayout.add(
             _TaskLayout(
               task: event.task,
               date: dayDate,
@@ -1330,8 +1966,28 @@ class _TimeGridState extends State<_TimeGrid> {
               endMinutes: event.endMinutes,
               left: left,
               top: top,
-              width: width,
+              width: collapsedWidth.toDouble(),
               height: height,
+              allowResize: event.allowResize,
+            ),
+          );
+        }
+
+        if (hiddenTasks.isNotEmpty) {
+          final left = dayIndex * widget.dayWidth + _gridPadding;
+          final top = (hiddenStart / 15) * _quarterHeight;
+          moreLayout.add(
+            _OverlapMoreLayout(
+              date: dayDate,
+              startMinutes: hiddenStart,
+              endMinutes:
+                  hiddenEnd.clamp(hiddenStart + 15, 24 * 60).toInt(),
+              tasks: hiddenTasks,
+              left: left,
+              top: top,
+              width: (widget.dayWidth - _gridPadding * 2)
+                  .clamp(0.0, double.infinity)
+                  .toDouble(),
             ),
           );
         }
@@ -1365,23 +2021,25 @@ class _TimeGridState extends State<_TimeGrid> {
                 painter: _GridPainter(
                     dayCount: widget.dayCount, dayWidth: widget.dayWidth),
               ),
-              for (final item in layout)
+              for (final item in taskLayout)
                 Positioned(
                   left: item.left,
                   top: item.top,
                   width: item.width,
                   height: item.height,
                   child: _ResizableTaskBlock(
-                    key: ValueKey(item.task.id),
+                    key: ValueKey(
+                        '${item.task.id}_${_CalendarViewState._dateFormatter.format(item.date)}_${item.startMinutes}'),
                     task: item.task,
                     date: item.date,
                     startMinutes: item.startMinutes,
                     endMinutes: item.endMinutes,
-                    onResizePreview: widget.onResizeTask == null
+                    onResizePreview:
+                        widget.onResizeTask == null || !item.allowResize
                         ? null
                         : (startMinutes, endMinutes) => _previewTaskRange(
                             item.task.id, startMinutes, endMinutes),
-                    onResizeCommit: widget.onResizeTask == null
+                    onResizeCommit: widget.onResizeTask == null || !item.allowResize
                         ? null
                         : (startMinutes, endMinutes) => _commitTaskRange(
                             item.task, item.date, startMinutes, endMinutes),
@@ -1395,6 +2053,29 @@ class _TimeGridState extends State<_TimeGrid> {
                       onOpen: widget.onOpenTask == null
                           ? null
                           : () => widget.onOpenTask!(item.task),
+                    ),
+                  ),
+                ),
+              for (final more in moreLayout)
+                Positioned(
+                  left: more.left,
+                  top: more.top + 2,
+                  width: more.width,
+                  height: 20,
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: Padding(
+                      padding: const EdgeInsets.only(right: 2),
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () => _openOverlappingTasksSheet(
+                          more.date,
+                          more.startMinutes,
+                          more.endMinutes,
+                          more.tasks,
+                        ),
+                        child: _MoreBadge(count: more.tasks.length),
+                      ),
                     ),
                   ),
                 ),
@@ -1464,6 +2145,7 @@ class _TaskLayout {
     required this.top,
     required this.width,
     required this.height,
+    required this.allowResize,
   });
 
   final Task task;
@@ -1474,6 +2156,7 @@ class _TaskLayout {
   final double top;
   final double width;
   final double height;
+  final bool allowResize;
 }
 
 class _TimeRangeOverride {
@@ -1489,11 +2172,13 @@ class _TimelineEvent {
     required this.task,
     required this.startMinutes,
     required this.endMinutes,
+    required this.allowResize,
   });
 
   final Task task;
   final int startMinutes;
   final int endMinutes;
+  final bool allowResize;
 }
 
 class _TimelineEventPlacement {
@@ -1502,6 +2187,26 @@ class _TimelineEventPlacement {
 
   final _TimelineEvent event;
   final int columnIndex;
+}
+
+class _OverlapMoreLayout {
+  const _OverlapMoreLayout({
+    required this.date,
+    required this.startMinutes,
+    required this.endMinutes,
+    required this.tasks,
+    required this.left,
+    required this.top,
+    required this.width,
+  });
+
+  final DateTime date;
+  final int startMinutes;
+  final int endMinutes;
+  final List<Task> tasks;
+  final double left;
+  final double top;
+  final double width;
 }
 
 // ignore: unused_element
@@ -1613,6 +2318,12 @@ class _TimelineTaskBlock extends StatelessWidget {
     }
     final metaText = metaParts.join('  ');
 
+    final remindLabel = _buildTaskRemindLabel(task);
+    final repeatLabel = _buildTaskRepeatLabel(task.repeatRule);
+    final attachmentCount = task.attachments.length;
+    final hasIndicators =
+        remindLabel != null || repeatLabel != null || attachmentCount > 0;
+
     final checkbox = InkWell(
       onTap: onToggle,
       borderRadius: BorderRadius.circular(4),
@@ -1649,7 +2360,75 @@ class _TimelineTaskBlock extends StatelessWidget {
             fontWeight: FontWeight.w700,
             color: mutedFg.withOpacity(0.9),
           );
-          final showMeta = metaText.isNotEmpty && constraints.maxHeight >= 46;
+          final showMeta = (metaText.isNotEmpty || hasIndicators) &&
+              constraints.maxHeight >= 46;
+          final indicatorColor = mutedFg.withOpacity(0.9);
+
+          final inlineIcons = <IconData>[];
+          if (hasIndicators && !showMeta) {
+            if (remindLabel != null) {
+              inlineIcons.add(Icons.notifications_active_outlined);
+            }
+            if (attachmentCount > 0) {
+              inlineIcons.add(Icons.attach_file);
+            }
+            if (repeatLabel != null) {
+              inlineIcons.add(Icons.repeat);
+            }
+            final maxIcons = constraints.maxWidth >= 90 ? 3 : 1;
+            if (inlineIcons.length > maxIcons) {
+              inlineIcons.removeRange(maxIcons, inlineIcons.length);
+            }
+          }
+
+          final metaSpans = <InlineSpan>[];
+          void addMetaSeparator() {
+            if (metaSpans.isEmpty) return;
+            metaSpans.add(const TextSpan(text: '  '));
+          }
+
+          void addMetaText(String text) {
+            if (text.trim().isEmpty) return;
+            addMetaSeparator();
+            metaSpans.add(TextSpan(text: text));
+          }
+
+          void addMetaIcon(IconData icon, {String label = ''}) {
+            addMetaSeparator();
+            metaSpans.add(
+              WidgetSpan(
+                alignment: PlaceholderAlignment.middle,
+                child: Icon(icon, size: 12, color: indicatorColor),
+              ),
+            );
+            if (label.trim().isEmpty) return;
+            metaSpans.add(TextSpan(text: ' $label'));
+          }
+
+          if (showStartTime && start.isNotEmpty) {
+            addMetaText(start);
+          }
+          if (remindLabel != null) {
+            final showLabel = !(showStartTime &&
+                start.isNotEmpty &&
+                remindLabel.trim() == start);
+            addMetaIcon(
+              Icons.notifications_active_outlined,
+              label: showLabel ? remindLabel : '',
+            );
+          }
+          if (attachmentCount > 0) {
+            addMetaIcon(Icons.attach_file, label: attachmentCount.toString());
+          }
+          if (repeatLabel != null) {
+            addMetaIcon(Icons.repeat, label: repeatLabel);
+          }
+          if (showTags) {
+            for (final tag in shownTags) {
+              addMetaText(tag);
+            }
+            if (extraTags > 0) addMetaText('+$extraTags');
+          }
           return Column(
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1659,6 +2438,22 @@ class _TimelineTaskBlock extends StatelessWidget {
                 children: [
                   checkbox,
                   const SizedBox(width: 6),
+                  if (inlineIcons.isNotEmpty) ...[
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        for (var i = 0; i < inlineIcons.length; i++) ...[
+                          if (i > 0) const SizedBox(width: 2),
+                          Icon(
+                            inlineIcons[i],
+                            size: 12,
+                            color: indicatorColor,
+                          ),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(width: 4),
+                  ],
                   Expanded(
                     child: ClipRect(
                       child: Align(
@@ -1690,11 +2485,10 @@ class _TimelineTaskBlock extends StatelessWidget {
                 const SizedBox(height: 2),
                 Padding(
                   padding: const EdgeInsets.only(left: 20),
-                  child: Text(
-                    metaText,
+                  child: Text.rich(
+                    TextSpan(style: metaStyle, children: metaSpans),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: metaStyle,
                   ),
                 ),
               ],
@@ -1910,7 +2704,9 @@ class _MonthDayCell extends StatelessWidget {
     final borderColor = selected ? AppColors.accent : AppColors.outline;
     final bg = selected
         ? AppColors.accent.withOpacity(0.06)
-        : Colors.white.withOpacity(0.85);
+        : (inMonth
+            ? Colors.white.withOpacity(0.85)
+            : Colors.white.withOpacity(0.55));
     final orderedTasks = tasks;
 
     return DragTarget<_TaskDragPayload>(
@@ -1918,10 +2714,13 @@ class _MonthDayCell extends StatelessWidget {
       onAcceptWithDetails: (details) => onDrop?.call(details.data.task),
       builder: (context, _, __) {
         return Container(
-          padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
+          padding: const EdgeInsets.fromLTRB(4, 4, 4, 4),
           decoration: BoxDecoration(
             color: bg,
-            border: Border.all(color: borderColor),
+            border: Border.all(
+              color: borderColor,
+              width: selected ? 2 : 0.5,
+            ),
           ),
 	          child: LayoutBuilder(
 	            builder: (context, constraints) {
@@ -1938,30 +2737,20 @@ class _MonthDayCell extends StatelessWidget {
                         fontSize: 10,
                         height: 1.0,
                       );
-              double taskFontSizeForCount(int count) {
-                if (count <= 1) return 12;
-                if (count == 2) return 11;
-                if (count == 3) return 10;
-                if (count == 4) return 9.5;
-                if (count == 5) return 9;
-                return 8.5;
-              }
-
-	              final baseTaskFontSize =
-	                  taskFontSizeForCount(orderedTasks.length) + 2;
-	              TextStyle? taskStyle =
-	                  Theme.of(context).textTheme.labelSmall?.copyWith(
-	                        color: AppColors.ink,
-	                        fontWeight: FontWeight.w700,
-	                        fontSize: baseTaskFontSize,
-	                        height: 1.0,
-	                      );
 	              final holidayStyle =
 	                  Theme.of(context).textTheme.labelSmall?.copyWith(
 	                        fontWeight: FontWeight.w800,
 	                        fontSize: 10,
                         height: 1.0,
                       );
+	              const baseTaskFontSize = 11.0;
+	              final taskStyle =
+	                  Theme.of(context).textTheme.labelSmall?.copyWith(
+	                        color: AppColors.ink,
+	                        fontWeight: FontWeight.w700,
+	                        fontSize: baseTaskFontSize,
+	                        height: 1.0,
+	                      );
 
               double lineHeight(TextStyle? style, double fallbackFontSize) {
                 final fontSize =
@@ -1983,28 +2772,16 @@ class _MonthDayCell extends StatelessWidget {
 	                  .clamp(0.0, double.infinity)
 	                  .toDouble();
 
-	              var showCheckbox = constraints.maxWidth >= 110;
-	              var showStartTimeInline = showTaskStartTime;
-	              var showTagsInline = showTaskTags;
-	              var titleMaxLines = 1;
-	              if (constraints.maxWidth < 110) {
-	                showStartTimeInline = false;
-	                showTagsInline = false;
-	              }
+	              final showCheckbox = constraints.maxWidth >= 110;
+	              final showStartTimeInline =
+	                  showTaskStartTime && constraints.maxWidth >= 110;
+	              final showTagsInline = showTaskTags && constraints.maxWidth >= 110;
 
-	              double taskLine = lineHeight(taskStyle, baseTaskFontSize);
-	              double taskRowHeight;
-	              if (showCheckbox) {
-	                const checkboxSize = 16.0;
-	                taskRowHeight =
-	                    taskLine > checkboxSize ? taskLine : checkboxSize;
-	              } else {
-	                taskRowHeight = taskLine;
-	              }
+	              const taskRowHeight = 16.0;
 	              const taskGap = 1.0;
 
 	              int fitLines(double space) {
-	                const safety = 4.0;
+	                const safety = 2.0;
 	                space = (space - safety).clamp(0.0, double.infinity);
 	                if (space + 0.5 < taskRowHeight) return 0;
 	                final perLine = taskRowHeight + taskGap;
@@ -2012,21 +2789,7 @@ class _MonthDayCell extends StatelessWidget {
 	                return count.clamp(0, 6);
 	              }
 
-	              var maxLines = fitLines(available);
-	              if (maxLines == 0 && orderedTasks.isNotEmpty) {
-	                showCheckbox = false;
-	                showStartTimeInline = false;
-	                showTagsInline = false;
-
-	                final compactFontSize =
-	                    math.min<double>(baseTaskFontSize, 9.0);
-	                taskStyle = taskStyle?.copyWith(fontSize: compactFontSize);
-	                taskLine = lineHeight(taskStyle, compactFontSize);
-	                taskRowHeight =
-	                    math.min<double>(available, (taskLine * 2.2).clamp(12.0, 40.0));
-	                titleMaxLines = taskRowHeight >= taskLine * 2 - 0.5 ? 2 : 1;
-	                maxLines = 1;
-	              }
+	              final maxLines = fitLines(available);
 	              final visible = orderedTasks.take(maxLines).toList();
 	              final remaining =
 	                  (orderedTasks.length - visible.length).clamp(0, 9999);
@@ -2178,44 +2941,69 @@ class _MonthDayCell extends StatelessWidget {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Row(
-                                children: [
-                                  Text('${date.day}', style: dayStyle),
-                                  const SizedBox(width: 6),
-                                  Expanded(
-                                    child: Text(
-                                      lunarLabel,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: lunarStyle,
+                              SizedBox(
+                                height: headerLine,
+                                child: Stack(
+                                  alignment: Alignment.topLeft,
+                                  clipBehavior: Clip.hardEdge,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Text('${date.day}', style: dayStyle),
+                                        SizedBox(
+                                            width: constraints.maxWidth < 60
+                                                ? 2
+                                                : 6),
+                                        Expanded(
+                                          child: Padding(
+                                            padding: EdgeInsets.only(
+                                              right: holiday == null
+                                                  ? 0
+                                                  : (constraints.maxWidth < 60
+                                                      ? 18
+                                                      : 24),
+                                            ),
+                                            child: Text(
+                                              lunarLabel,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: lunarStyle,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
                                     ),
-                                  ),
-                                  if (holiday != null) ...[
-                                    const SizedBox(width: 6),
-                                    _HolidayBadge(day: holiday!, dense: true),
+                                    if (holiday != null)
+                                      Positioned(
+                                        top: 0,
+                                        right: 0,
+                                        child:
+                                            _HolidayBadge(day: holiday!, dense: true),
+                                      ),
                                   ],
-                                ],
+                                ),
                               ),
-	                              const SizedBox(height: contentGap),
-	                              for (var i = 0; i < visible.length; i++) ...[
-	                                if (i > 0) const SizedBox(height: taskGap),
-	                                _MonthTaskLine(
-	                                  task: visible[i],
-	                                  style: taskStyle,
-	                                  height: taskRowHeight,
-	                                  showCheckbox: showCheckbox,
-	                                  titleMaxLines: titleMaxLines,
-	                                  showStartTime: showStartTimeInline,
-	                                  showTags: showTagsInline,
-	                                  onTap: onOpenTask == null
-	                                      ? openAllTasks
-	                                      : () => onOpenTask?.call(visible[i]),
-	                                  onLongPress: openAllTasks,
-                                  onToggle: onToggleTask == null
-                                      ? null
-                                      : () {
-                                          final task = visible[i];
-                                          onToggleTask!.call(task);
+                              const SizedBox(height: contentGap),
+                              for (var i = 0; i < visible.length; i++) ...[
+                                if (i > 0) const SizedBox(height: taskGap),
+                                SizedBox(
+                                  width: double.infinity,
+	                                  child: _MonthTaskLine(
+	                                    task: visible[i],
+	                                    style: taskStyle,
+	                                    height: taskRowHeight,
+	                                    showCheckbox: showCheckbox,
+	                                    showStartTime: showStartTimeInline,
+	                                    showTags: showTagsInline,
+	                                    onTap: onOpenTask == null
+	                                        ? openAllTasks
+	                                        : () => onOpenTask?.call(visible[i]),
+	                                    onLongPress: openAllTasks,
+	                                    onToggle: onToggleTask == null
+	                                        ? null
+	                                        : () {
+	                                            final task = visible[i];
+	                                            onToggleTask!.call(task);
 
                                           if (onReorderTasks == null) return;
                                           final updatedIsDone =
@@ -2243,8 +3031,9 @@ class _MonthDayCell extends StatelessWidget {
                                               nextOrder
                                                   .map((task) => task.id)
                                                   .toList());
-                                        },
-                                ),
+	                                          },
+	                                  ),
+	                                ),
                               ],
                             ],
                           ),
@@ -2278,7 +3067,6 @@ class _MonthTaskLine extends StatelessWidget {
     required this.style,
     required this.height,
     required this.showCheckbox,
-    this.titleMaxLines = 1,
     required this.showStartTime,
     required this.showTags,
     this.onTap,
@@ -2290,12 +3078,16 @@ class _MonthTaskLine extends StatelessWidget {
   final TextStyle? style;
   final double height;
   final bool showCheckbox;
-  final int titleMaxLines;
   final bool showStartTime;
   final bool showTags;
   final VoidCallback? onTap;
   final VoidCallback? onLongPress;
   final VoidCallback? onToggle;
+
+  static const _textHeightBehavior = TextHeightBehavior(
+    applyHeightToFirstAscent: false,
+    applyHeightToLastDescent: false,
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -2311,86 +3103,164 @@ class _MonthTaskLine extends StatelessWidget {
     final tags = showTags ? task.displayTags : const <String>[];
     final shownTags = tags.take(1).toList();
     final extraTags = (tags.length - shownTags.length).clamp(0, 999);
+    final start = showStartTime ? task.startTime.trim() : '';
+    final remindLabel = _buildTaskRemindLabel(task);
+    final repeatLabel = _buildTaskRepeatLabel(task.repeatRule);
+    final attachmentCount = task.attachments.length;
+
+    final labelParts = <String>[
+      title,
+      if (start.isNotEmpty) start,
+      ...shownTags,
+      if (extraTags > 0) '+$extraTags',
+    ];
+    final label =
+        labelParts.where((part) => part.trim().isNotEmpty).join('  ');
 
     final baseStyle =
         (style ?? Theme.of(context).textTheme.labelSmall)?.copyWith(
       decoration: isDone ? TextDecoration.lineThrough : null,
       color: isDone ? fg.withOpacity(0.65) : fg,
+      height: 1.0,
     );
-    final start = showStartTime ? task.startTime.trim() : '';
-    final metaStyle = baseStyle?.copyWith(fontWeight: FontWeight.w700);
+    final fontSize = baseStyle?.fontSize ?? 11.0;
+    final indicatorColor = isDone ? fg.withOpacity(0.6) : fg.withOpacity(0.85);
+    final indicatorTextStyle = baseStyle?.copyWith(
+      fontWeight: FontWeight.w700,
+      color: indicatorColor,
+      height: 1.0,
+    );
 
-    final content = Container(
-      height: height,
-      padding: titleMaxLines > 1
-          ? const EdgeInsets.symmetric(horizontal: 6, vertical: 2)
-          : const EdgeInsets.symmetric(horizontal: 6),
-      decoration: BoxDecoration(
-        color: blockBg,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: blockBorder, width: 0.5),
-      ),
-      child: Row(
-        crossAxisAlignment: titleMaxLines > 1
-            ? CrossAxisAlignment.start
-            : CrossAxisAlignment.center,
-        children: [
-          if (showCheckbox) ...[
-            InkWell(
-              onTap: onToggle,
-              borderRadius: BorderRadius.circular(4),
-              child: Container(
-                width: 16,
-                height: 16,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(4),
-                  border: Border.all(color: fg.withOpacity(0.9), width: 1.6),
-                  color: isDone ? AppColors.accentCool : Colors.transparent,
-                ),
-                child: isDone
-                    ? const Icon(Icons.check, size: 12, color: Colors.white)
-                    : null,
+    final indicators = <Widget>[];
+    void addIndicator(Widget widget) {
+      if (indicators.isNotEmpty) indicators.add(const SizedBox(width: 4));
+      indicators.add(widget);
+    }
+
+    var compactIconCount = 0;
+    void addCompactIcon(IconData icon, {double size = 10}) {
+      if (compactIconCount >= 2) return;
+      compactIconCount += 1;
+      addIndicator(Icon(icon, size: size, color: indicatorColor));
+    }
+
+    if (!showCheckbox) {
+      if (remindLabel != null) {
+        addCompactIcon(Icons.notifications_active_outlined);
+      }
+      if (attachmentCount > 0) {
+        addCompactIcon(Icons.attach_file);
+      }
+      if (repeatLabel != null) {
+        addCompactIcon(Icons.repeat);
+      }
+    } else {
+      if (remindLabel != null) {
+        final showLabel =
+            remindLabel.trim().isNotEmpty && remindLabel.trim() != start;
+        addIndicator(
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.notifications_active_outlined,
+                size: 10,
+                color: indicatorColor,
               ),
-            ),
-            const SizedBox(width: 6),
-          ],
-          Flexible(
-            fit: FlexFit.loose,
-            child: Text(
-              title,
-              maxLines: titleMaxLines,
-              softWrap: titleMaxLines > 1,
-              overflow: TextOverflow.ellipsis,
-              style: baseStyle,
-            ),
-          ),
-          if (showStartTime && start.isNotEmpty) ...[
-            const SizedBox(width: 4),
-            Text(start, style: metaStyle),
-          ],
-          if (showTags)
-            for (final tag in shownTags) ...[
-              const SizedBox(width: 4),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 52),
-                child: Text(
-                  tag,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: metaStyle,
-                ),
-              ),
+              if (showLabel) ...[
+                const SizedBox(width: 2),
+                Text(remindLabel, style: indicatorTextStyle),
+              ],
             ],
-          if (showTags && extraTags > 0) ...[
-            const SizedBox(width: 4),
-            Text('+$extraTags', style: metaStyle),
+          ),
+        );
+      }
+      if (attachmentCount > 0) {
+        addIndicator(
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.attach_file, size: 10, color: indicatorColor),
+              const SizedBox(width: 2),
+              Text('$attachmentCount', style: indicatorTextStyle),
+            ],
+          ),
+        );
+      }
+      if (repeatLabel != null) {
+        addIndicator(Icon(Icons.repeat, size: 10, color: indicatorColor));
+      }
+    }
+
+    final content = SizedBox(
+      width: double.infinity,
+      height: height,
+      child: Container(
+        width: double.infinity,
+        height: height,
+        alignment: Alignment.centerLeft,
+        padding: const EdgeInsets.symmetric(horizontal: 2),
+        decoration: BoxDecoration(
+          color: blockBg,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: blockBorder, width: 0.5),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            if (showCheckbox) ...[
+              InkWell(
+                onTap: onToggle,
+                borderRadius: BorderRadius.circular(3),
+                child: Container(
+                  width: 12,
+                  height: 12,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(3),
+                    border: Border.all(color: fg.withOpacity(0.9), width: 1.4),
+                    color: isDone ? AppColors.accentCool : Colors.transparent,
+                  ),
+                  child: isDone
+                      ? const Icon(Icons.check, size: 10, color: Colors.white)
+                      : null,
+                ),
+              ),
+              const SizedBox(width: 4),
+            ],
+            Expanded(
+              child: Text(
+                label,
+                maxLines: 1,
+                softWrap: false,
+                overflow: TextOverflow.ellipsis,
+                style: baseStyle,
+                strutStyle: StrutStyle(
+                  fontSize: fontSize,
+                  height: 1.0,
+                  leading: 0,
+                  forceStrutHeight: true,
+                ),
+                textHeightBehavior: _textHeightBehavior,
+              ),
+            ),
+            if (indicators.isNotEmpty) ...[
+              const SizedBox(width: 4),
+              ...indicators,
+            ],
           ],
-        ],
+        ),
       ),
     );
 
     if (onTap == null && onLongPress == null) return content;
-    return InkWell(onTap: onTap, onLongPress: onLongPress, child: content);
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        onTap: onTap,
+        onLongPress: onLongPress,
+        child: content,
+      ),
+    );
   }
 }
 
@@ -2426,6 +3296,9 @@ class _MonthTaskTile extends StatelessWidget {
 
     final title = task.title.trim().isEmpty ? '未命名任务' : task.title.trim();
     final start = showStartTime ? task.startTime.trim() : '';
+    final remindLabel = _buildTaskRemindLabel(task);
+    final repeatLabel = _buildTaskRepeatLabel(task.repeatRule);
+    final attachmentCount = task.attachments.length;
     final tags = showTags ? task.displayTags : const <String>[];
     final shownTags = tags.take(6).toList();
     final extraTags = (tags.length - shownTags.length).clamp(0, 999);
@@ -2441,10 +3314,40 @@ class _MonthTaskTile extends StatelessWidget {
           color: mutedFg,
         );
 
-    final spans = <TextSpan>[
+    final indicatorColor = mutedFg.withOpacity(0.9);
+    final spans = <InlineSpan>[
       TextSpan(text: title, style: titleStyle),
       if (showStartTime && start.isNotEmpty)
         TextSpan(text: '  $start', style: metaStyle),
+      if (remindLabel != null) ...[
+        const TextSpan(text: '  '),
+        WidgetSpan(
+          alignment: PlaceholderAlignment.middle,
+          child: Icon(
+            Icons.notifications_active_outlined,
+            size: 14,
+            color: indicatorColor,
+          ),
+        ),
+        if (!(showStartTime && start.isNotEmpty && remindLabel.trim() == start))
+          TextSpan(text: ' $remindLabel', style: metaStyle),
+      ],
+      if (attachmentCount > 0) ...[
+        const TextSpan(text: '  '),
+        WidgetSpan(
+          alignment: PlaceholderAlignment.middle,
+          child: Icon(Icons.attach_file, size: 14, color: indicatorColor),
+        ),
+        TextSpan(text: ' $attachmentCount', style: metaStyle),
+      ],
+      if (repeatLabel != null) ...[
+        const TextSpan(text: '  '),
+        WidgetSpan(
+          alignment: PlaceholderAlignment.middle,
+          child: Icon(Icons.repeat, size: 14, color: indicatorColor),
+        ),
+        TextSpan(text: ' $repeatLabel', style: metaStyle),
+      ],
       if (showTags)
         for (final tag in shownTags) TextSpan(text: '  $tag', style: metaStyle),
       if (showTags && extraTags > 0)
@@ -2561,15 +3464,63 @@ int? _parseTimeToMinutes(String value) {
   return hour * 60 + minute;
 }
 
+int _parseOffsetDays(String raw) {
+  final trimmed = raw.trim();
+  final plusIndex = trimmed.lastIndexOf('+');
+  if (plusIndex <= 0) return 0;
+  final parsed = int.tryParse(trimmed.substring(plusIndex + 1).trim()) ?? 0;
+  return parsed <= 0 ? 0 : parsed;
+}
+
+bool _isCrossDayTask(Task task) {
+  final startDay = _tryParseDayKey(task.dueDate.trim());
+  if (startDay == null) return false;
+
+  final startMinutes = _parseTimeToMinutes(task.startTime);
+  final endMinutesRaw = _parseTimeToMinutes(task.endTime);
+  final endDateKey = task.endDate.trim();
+
+  if (startMinutes == null) {
+    final endDay = _tryParseDayKey(endDateKey);
+    return endDay != null && endDay.isAfter(startDay);
+  }
+  if (endMinutesRaw == null) return false;
+
+  var endMinutes = endMinutesRaw;
+  var offsetDays = 0;
+  if (endMinutes == 24 * 60) {
+    endMinutes = 0;
+    offsetDays += 1;
+  }
+  if (endDateKey.isNotEmpty) {
+    final endDay = _tryParseDayKey(endDateKey);
+    if (endDay != null) {
+      offsetDays += endDay.difference(startDay).inDays;
+    }
+  } else {
+    offsetDays += _parseOffsetDays(task.endTime);
+  }
+  if (offsetDays < 0) offsetDays = 0;
+  if (offsetDays > 0) return true;
+  return endMinutes <= startMinutes;
+}
+
+DateTime? _tryParseDayKey(String key) {
+  final trimmed = key.trim();
+  if (trimmed.isEmpty) return null;
+  try {
+    return _stripTime(_CalendarViewState._dateFormatter.parseStrict(trimmed));
+  } catch (_) {
+    final parsed = DateTime.tryParse(trimmed);
+    if (parsed == null) return null;
+    return _stripTime(parsed);
+  }
+}
+
 int _parseEndMinutes(Task task, int startMinutes) {
   final raw = task.endTime.trim();
   if (raw.isEmpty) return (startMinutes + 30).clamp(0, 24 * 60);
-  final offsetDays = () {
-    final plusIndex = raw.lastIndexOf('+');
-    if (plusIndex <= 0) return 0;
-    final parsed = int.tryParse(raw.substring(plusIndex + 1).trim()) ?? 0;
-    return parsed < 0 ? 0 : parsed;
-  }();
+  final offsetDays = _parseOffsetDays(raw);
 
   if (offsetDays > 0) return 24 * 60;
 

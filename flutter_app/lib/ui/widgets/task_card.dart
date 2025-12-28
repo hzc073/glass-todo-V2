@@ -1,6 +1,8 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import 'dart:convert';
+
 import '../../models/task.dart';
 import '../app_theme.dart';
 import '../task_colors.dart';
@@ -26,12 +28,44 @@ class TaskCard extends StatelessWidget {
     final isDone = task.isCompleted;
     final cardColor = TaskColors.resolveBackground(task.id, task.colorHex);
     final dueLabel = _buildDueLabel(task);
+    final remindLabel = _buildRemindLabel(task);
+    final repeatLabel = _buildRepeatLabel(task.repeatRule);
     final metaPills = <Widget>[];
     if (dueLabel != null) {
       metaPills.add(
         _MetaPill(
           label: dueLabel,
           color: AppColors.accentCool,
+          compact: true,
+        ),
+      );
+    }
+    if (remindLabel != null) {
+      metaPills.add(
+        _MetaPill(
+          icon: Icons.notifications_active_outlined,
+          label: remindLabel,
+          color: AppColors.inkSoft,
+          compact: true,
+        ),
+      );
+    }
+    if (repeatLabel != null) {
+      metaPills.add(
+        _MetaPill(
+          icon: Icons.repeat,
+          label: repeatLabel,
+          color: AppColors.inkSoft,
+          compact: true,
+        ),
+      );
+    }
+    if (task.attachments.isNotEmpty) {
+      metaPills.add(
+        _MetaPill(
+          icon: Icons.attach_file,
+          label: task.attachments.length.toString(),
+          color: AppColors.inkSoft,
           compact: true,
         ),
       );
@@ -124,8 +158,18 @@ class TaskCard extends StatelessWidget {
       final startDateLabel = DateFormat('M月d日').format(date);
       final startTime = task.startTime.trim();
       final endRaw = task.endTime.trim();
+      final endDateKey = task.endDate.trim();
 
-      if (startTime.isEmpty && endRaw.isEmpty) return startDateLabel;
+      DateTime? parseDayKey(String raw) {
+        final trimmed = raw.trim();
+        if (trimmed.isEmpty) return null;
+        try {
+          return DateFormat('yyyy-MM-dd').parseStrict(trimmed);
+        } catch (_) {
+          final parsed = DateTime.tryParse('${trimmed}T00:00:00');
+          return parsed;
+        }
+      }
 
       int? parseTimeMinutes(String raw) {
         final trimmed = raw.trim();
@@ -142,6 +186,15 @@ class TaskCard extends StatelessWidget {
         return hour * 60 + minute;
       }
 
+      final parsedEndDay = parseDayKey(endDateKey);
+      if (startTime.isEmpty && endRaw.isEmpty) {
+        if (parsedEndDay != null && parsedEndDay.isAfter(date)) {
+          final endDateLabel = DateFormat('M月d日').format(parsedEndDay);
+          return '$startDateLabel - $endDateLabel';
+        }
+        return startDateLabel;
+      }
+
       final startLabel =
           startTime.isEmpty ? startDateLabel : '$startDateLabel $startTime';
       if (endRaw.isEmpty) return startLabel;
@@ -154,24 +207,31 @@ class TaskCard extends StatelessWidget {
       final timePart =
           (hasExplicitOffset ? endRaw.substring(0, plusIndex) : endRaw).trim();
 
-      var offsetDays = explicitOffset.clamp(0, 1);
-      var displayTime = timePart;
-      if (timePart == '24:00') {
-        offsetDays = 1;
-        displayTime = '00:00';
-      } else if (!hasExplicitOffset) {
-        final startMinutes = parseTimeMinutes(startTime);
-        final endMinutes = parseTimeMinutes(timePart);
-        if (startMinutes != null &&
-            endMinutes != null &&
-            endMinutes <= startMinutes) {
-          offsetDays = 1;
-        }
+      var endDay = parsedEndDay ?? date;
+      if (endDateKey.isEmpty && explicitOffset > 0) {
+        endDay = date.add(Duration(days: explicitOffset.clamp(0, 36525)));
       }
 
-      if (offsetDays > 0) {
-        final endDateLabel =
-            DateFormat('M月d日').format(date.add(Duration(days: offsetDays)));
+      var displayTime = timePart;
+      var endMinutes = parseTimeMinutes(timePart);
+      if (timePart == '24:00' || endMinutes == 24 * 60) {
+        displayTime = '00:00';
+        endMinutes = 0;
+        endDay = endDay.add(const Duration(days: 1));
+      }
+
+      final startMinutes = parseTimeMinutes(startTime);
+      if (startMinutes != null &&
+          endMinutes != null &&
+          endDay.year == date.year &&
+          endDay.month == date.month &&
+          endDay.day == date.day &&
+          endMinutes <= startMinutes) {
+        endDay = endDay.add(const Duration(days: 1));
+      }
+
+      if (endDay.isAfter(date)) {
+        final endDateLabel = DateFormat('M月d日').format(endDay);
         return startTime.isEmpty
             ? '$startDateLabel - $endDateLabel $displayTime'
             : '$startDateLabel $startTime - $endDateLabel $displayTime';
@@ -182,6 +242,57 @@ class TaskCard extends StatelessWidget {
           : '$startDateLabel $startTime - $displayTime';
     } catch (_) {
       return task.dueDate;
+    }
+  }
+
+  String? _buildRemindLabel(Task task) {
+    final millis = task.remindAt;
+    if (millis == null) return null;
+
+    DateTime? dueDate;
+    if (task.dueDate.trim().isNotEmpty) {
+      try {
+        dueDate = DateFormat('yyyy-MM-dd').parse(task.dueDate);
+      } catch (_) {
+        dueDate = null;
+      }
+    }
+
+    try {
+      final remindAt = DateTime.fromMillisecondsSinceEpoch(millis);
+      final isSameDay = dueDate != null &&
+          remindAt.year == dueDate.year &&
+          remindAt.month == dueDate.month &&
+          remindAt.day == dueDate.day;
+      return isSameDay
+          ? DateFormat('HH:mm').format(remindAt)
+          : DateFormat('M/d HH:mm').format(remindAt);
+    } catch (_) {
+      return millis.toString();
+    }
+  }
+
+  String? _buildRepeatLabel(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(trimmed);
+      if (decoded is! Map) return '重复';
+      final freq = decoded['freq']?.toString() ?? '';
+      switch (freq) {
+        case 'daily':
+          return '每天';
+        case 'weekly':
+          return '每周';
+        case 'monthly':
+          return '每月';
+        case 'yearly':
+          return '每年';
+        default:
+          return '重复';
+      }
+    } catch (_) {
+      return '重复';
     }
   }
 }
@@ -218,19 +329,24 @@ class _StatusToggle extends StatelessWidget {
 
 class _MetaPill extends StatelessWidget {
   const _MetaPill({
+    this.icon,
     required this.label,
     required this.color,
     this.compact = false,
   });
 
+  final IconData? icon;
   final String label;
   final Color color;
   final bool compact;
 
   @override
   Widget build(BuildContext context) {
+    final iconOnly = icon != null && label.trim().isEmpty;
     final padding = compact
-        ? const EdgeInsets.symmetric(horizontal: 8, vertical: 4)
+        ? (iconOnly
+            ? const EdgeInsets.symmetric(horizontal: 6, vertical: 4)
+            : const EdgeInsets.symmetric(horizontal: 8, vertical: 4))
         : const EdgeInsets.symmetric(horizontal: 10, vertical: 6);
     final textStyle = (compact
             ? Theme.of(context).textTheme.labelSmall
@@ -246,9 +362,15 @@ class _MetaPill extends StatelessWidget {
         borderRadius: BorderRadius.circular(999),
         border: Border.all(color: color.withOpacity(0.4)),
       ),
-      child: Text(
-        label,
-        style: textStyle,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: compact ? 14 : 16, color: color),
+            if (label.trim().isNotEmpty) const SizedBox(width: 4),
+          ],
+          if (label.trim().isNotEmpty) Text(label, style: textStyle),
+        ],
       ),
     );
   }

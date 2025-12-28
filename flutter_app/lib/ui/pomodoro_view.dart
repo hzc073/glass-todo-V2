@@ -570,19 +570,26 @@ class _PomodoroViewState extends State<PomodoroView> {
             child: Center(
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 420),
-                child: AspectRatio(
-                  aspectRatio: 1,
-                  child: _PomodoroRing(
-                    progress: ratio,
-                    isRunning: _state.isRunning,
-                    onToggle: _saving ? null : _toggleRunPause,
-                    timeLabel: timeLabel,
-                    onTapTime: _saving ? null : _openSettings,
+                  child: AspectRatio(
+                    aspectRatio: 1,
+                    child: TweenAnimationBuilder<double>(
+                      tween: Tween<double>(begin: ratio, end: ratio),
+                      duration: _state.isRunning
+                          ? const Duration(seconds: 1)
+                          : Duration.zero,
+                      curve: Curves.linear,
+                      builder: (context, value, _) => _PomodoroRing(
+                        progress: value,
+                        isRunning: _state.isRunning,
+                        onToggle: _saving ? null : _toggleRunPause,
+                        timeLabel: timeLabel,
+                        onTapTime: _saving ? null : _openSettings,
+                      ),
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
           const SizedBox(height: 14),
           Row(
             children: [

@@ -1,9 +1,13 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../core/api_client.dart';
+import '../../core/notifications/fcm_notification_controller.dart';
+import '../../core/notifications/firebase_bootstrap.dart';
+import '../../core/notifications/local_task_notifications.dart';
 import '../../models/user_settings.dart';
 import '../app_theme.dart';
 
@@ -95,6 +99,9 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
   bool _isAdmin = false;
   String _inviteCode = '';
   bool _loadingInvite = false;
+
+  bool _sendingFcmTest = false;
+  bool _sendingLocalTest = false;
 
   @override
   void initState() {
@@ -799,9 +806,67 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
         ),
         const SizedBox(height: 12),
         OutlinedButton.icon(
-          onPressed: n.enabled
+          onPressed: n.enabled && !_sendingLocalTest
               ? () async {
+                  setState(() => _sendingLocalTest = true);
                   try {
+                    final granted =
+                        await LocalTaskNotifications.instance.requestPermission();
+                    if (!mounted) return;
+                    if (!granted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('系统未授予通知权限。')),
+                      );
+                      return;
+                    }
+                    await LocalTaskNotifications.instance.showTestNotification();
+                  } finally {
+                    if (mounted) setState(() => _sendingLocalTest = false);
+                  }
+                }
+              : null,
+          icon: const Icon(Icons.notifications),
+          label: Text(_sendingLocalTest ? '发送中…' : '测试本地通知'),
+        ),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: n.enabled && !_sendingFcmTest
+              ? () async {
+                  setState(() => _sendingFcmTest = true);
+                  try {
+                    final ready = await FirebaseBootstrap.ensureInitialized();
+                    if (!mounted) return;
+                    if (!ready) {
+                      final hint = kIsWeb
+                          ? '请先配置 Web 的 Firebase 信息（FcmConfig）。'
+                          : 'Android 需配置 `android/app/google-services.json` 并启用 Google Services 插件。';
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('FCM 未配置，无法发送通知。$hint')),
+                      );
+                      return;
+                    }
+
+                    final sync = await FcmNotificationController(
+                      apiClient: widget.apiClient,
+                    ).enable();
+                    if (!mounted) return;
+                    if (sync.state != FcmSyncState.enabled) {
+                      final msg = switch (sync.state) {
+                        FcmSyncState.permissionDenied =>
+                          '系统未授予通知权限，请在系统设置中允许通知后重试。',
+                        FcmSyncState.notConfigured => 'FCM 未配置，无法启用通知。',
+                        FcmSyncState.missingVapidKey =>
+                          '缺少 Web VAPID Key，无法启用通知。',
+                        FcmSyncState.disabled => '通知已关闭。',
+                        FcmSyncState.error =>
+                          '启用通知失败：${sync.details ?? '未知错误'}',
+                        FcmSyncState.enabled => '已启用通知。',
+                      };
+                      ScaffoldMessenger.of(context)
+                          .showSnackBar(SnackBar(content: Text(msg)));
+                      return;
+                    }
+
                     await widget.apiClient.sendFcmTest();
                     if (!mounted) return;
                     ScaffoldMessenger.of(context).showSnackBar(
@@ -809,9 +874,16 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
                     );
                   } on ApiException catch (e) {
                     if (!mounted) return;
-                    final msg = e.statusCode == 404
-                        ? '未找到设备 Token，请先在浏览器允许通知。'
-                        : '发送失败：${e.body}';
+                    final body = e.body.trim();
+                    final isFcmNotConfigured = e.statusCode == 500 &&
+                        (body.contains('FCM not configured') ||
+                            body.contains('\"FCM not configured\"'));
+                    final msg = switch (e.statusCode) {
+                      404 => '未找到设备 Token，请先打开“允许通知”，授予系统通知权限，并重新进入应用后再试。',
+                      _ when isFcmNotConfigured =>
+                        '服务器未配置 FCM（local_server 需设置 FIREBASE_SERVICE_ACCOUNT_JSON / FIREBASE_SERVICE_ACCOUNT_PATH）。',
+                      _ => '发送失败：${e.body}',
+                    };
                     ScaffoldMessenger.of(context)
                         .showSnackBar(SnackBar(content: Text(msg)));
                   } catch (_) {
@@ -819,11 +891,13 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(content: Text('发送失败。')),
                     );
+                  } finally {
+                    if (mounted) setState(() => _sendingFcmTest = false);
                   }
                 }
               : null,
           icon: const Icon(Icons.notifications_active_outlined),
-          label: const Text('发送测试通知（FCM）'),
+          label: Text(_sendingFcmTest ? '发送中…' : '发送测试推送（FCM，高级）'),
         ),
       ],
     );

@@ -4,11 +4,13 @@ import 'dart:convert';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 
 import '../core/api_client.dart';
+import '../core/notifications/local_task_notifications.dart';
 import '../core/time_repository.dart';
 import '../models/checklist.dart';
 import '../models/holiday_cn.dart';
@@ -111,7 +113,7 @@ class _TaskPageState extends State<TaskPage> {
   DateTime? _quickAddDate;
   TimeOfDay? _quickAddStartTime;
   TimeOfDay? _quickAddEndTime;
-  int _quickAddEndDayOffset = 0; // 0=同日, 1=次日
+  int _quickAddEndDayOffset = 0; // 0=同日, 1+=第N天
   bool _quickAddRepeat = false;
   RepeatFrequency _quickAddRepeatFrequency = RepeatFrequency.daily;
   int _quickAddRepeatCount = 1;
@@ -154,6 +156,22 @@ class _TaskPageState extends State<TaskPage> {
   List<PomodoroSession> _pomodoroSessions = [];
   int _statsFrom = 0;
   int _statsTo = 0;
+
+  Timer? _undoTimer;
+  _UndoAction? _pendingUndo;
+
+  bool get _localRemindersEnabled => widget.userSettings.notifications.enabled;
+
+  Future<void> _syncLocalTaskReminders() async {
+    if (kIsWeb) return;
+    if (!_localRemindersEnabled) {
+      await LocalTaskNotifications.instance.cancelAllTaskReminders();
+      return;
+    }
+    final granted = await LocalTaskNotifications.instance.requestPermission();
+    if (!granted) return;
+    await LocalTaskNotifications.instance.syncTaskReminders(_tasks);
+  }
 
   bool get _useAndroidUi => !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
@@ -215,6 +233,140 @@ class _TaskPageState extends State<TaskPage> {
     );
   }
 
+  bool get _undoEnabled => widget.userSettings.preferences.undoEnabled;
+
+  Duration _undoDuration() {
+    final seconds = widget.userSettings.preferences.undoSeconds;
+    return Duration(seconds: seconds.clamp(1, 20));
+  }
+
+  void _clearUndo() {
+    _undoTimer?.cancel();
+    _undoTimer = null;
+    _pendingUndo = null;
+  }
+
+  void _queueUndo({
+    required String message,
+    required Future<void> Function() onUndo,
+  }) {
+    if (!_undoEnabled || !mounted) return;
+    _undoTimer?.cancel();
+    final action = _UndoAction(message: message, onUndo: onUndo);
+    _pendingUndo = action;
+    final duration = _undoDuration();
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.clearSnackBars();
+    final controller = messenger.showSnackBar(
+      SnackBar(
+        content: Text(message),
+        duration: duration,
+        action: SnackBarAction(
+          label: '撤回',
+          onPressed: () => _performUndo(),
+        ),
+      ),
+    );
+    _undoTimer = Timer(duration, () {
+      if (!mounted) return;
+      if (!identical(_pendingUndo, action)) return;
+      controller.close();
+      _clearUndo();
+    });
+    controller.closed.then((_) {
+      if (!mounted) return;
+      if (identical(_pendingUndo, action)) {
+        _clearUndo();
+      }
+    });
+  }
+
+  Future<void> _performUndo() async {
+    final action = _pendingUndo;
+    if (action == null || !mounted) return;
+    _clearUndo();
+    ScaffoldMessenger.of(context).clearSnackBars();
+    try {
+      await action.onUndo();
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('已撤回。'),
+          duration: Duration(seconds: 1),
+        ),
+      );
+    } on UnauthorizedException {
+      widget.onLogout();
+    } catch (_) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('撤回失败。')),
+      );
+    }
+  }
+
+  Future<void> _applyTaskSnapshot(Task snapshot) async {
+    setState(() => _saving = true);
+    try {
+      final updated = await widget.apiClient.updateTask(
+        snapshot.id,
+        title: snapshot.title,
+        notes: snapshot.notes,
+        status: snapshot.status,
+        dueDate: snapshot.dueDate,
+        startTime: snapshot.startTime,
+        endTime: snapshot.endTime,
+        tags: snapshot.tags,
+        subtasks: snapshot.subtasks,
+        inbox: snapshot.inbox,
+        priority: snapshot.priority,
+        remindAt: snapshot.remindAt,
+        clearRemindAt: snapshot.remindAt == null,
+        repeatRule: snapshot.repeatRule,
+        deletedAt: snapshot.deletedAt,
+        clearDeletedAt: snapshot.deletedAt == null,
+      );
+      if (!mounted) return;
+      setState(() {
+        final exists = _tasks.any((task) => task.id == snapshot.id);
+        if (exists) {
+          _tasks = _tasks.map((t) => t.id == snapshot.id ? updated : t).toList();
+        } else {
+          _tasks = [..._tasks, updated];
+        }
+        _lastSync = DateTime.now();
+      });
+      unawaited(_syncLocalTaskReminders());
+    } on UnauthorizedException {
+      widget.onLogout();
+    } catch (e) {
+      _showFailureSnackBar('撤回失败', e);
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  String _undoMessageForTaskUpdate({
+    String? title,
+    String? notes,
+    String? status,
+    String? dueDate,
+    String? startTime,
+    String? endTime,
+    bool clearDeletedAt = false,
+  }) {
+    if (clearDeletedAt) return '已还原任务。';
+    if (status != null) {
+      return status == 'completed' ? '已完成任务。' : '已恢复为待办。';
+    }
+    if (dueDate != null || startTime != null || endTime != null) {
+      return '已更新日程。';
+    }
+    if (title != null) return '已修改标题。';
+    if (notes != null) return '已更新备注。';
+    return '已更新任务。';
+  }
+
   @override
   void initState() {
     super.initState();
@@ -238,6 +390,10 @@ class _TaskPageState extends State<TaskPage> {
     if (oldWidget.workspace != widget.workspace) {
       _handleWorkspaceChanged(widget.workspace);
     }
+    if (oldWidget.userSettings.notifications.enabled !=
+        widget.userSettings.notifications.enabled) {
+      unawaited(_syncLocalTaskReminders());
+    }
   }
 
   @override
@@ -246,6 +402,7 @@ class _TaskPageState extends State<TaskPage> {
     _quickAddController.dispose();
     _checklistAddController.dispose();
     _scrollController.dispose();
+    _undoTimer?.cancel();
     super.dispose();
   }
 
@@ -356,7 +513,12 @@ class _TaskPageState extends State<TaskPage> {
           children: [
             _buildToolbar(
               context,
-              isTasks: isTasks || isMatrix || isCalendar,
+              isTasks: isTasks ||
+                  isMatrix ||
+                  isCalendar ||
+                  isTimeTracking ||
+                  isPomodoro ||
+                  isStats,
             ),
             Expanded(
               child: Padding(
@@ -640,6 +802,60 @@ class _TaskPageState extends State<TaskPage> {
     required Task? selectedTask,
     required Widget header,
   }) {
+    final hasSearch = _searchQuery.trim().isNotEmpty;
+    if (hasSearch && !isTasks && !isMatrix && !isCalendar) {
+      final results =
+          _applySearch(_tasks.where((task) => task.deletedAt == null).toList())
+            ..sort(_sortTask);
+
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.search, size: 18, color: AppColors.inkSoft),
+              const SizedBox(width: 8),
+              Text(
+                '搜索结果（${results.length}）',
+                style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Expanded(
+            child: results.isEmpty
+                ? Center(
+                    child: EmptyState(
+                      title: '没有找到任务',
+                      subtitle: '',
+                      flat: true,
+                    ),
+                  )
+                : ListView.builder(
+                    controller: _scrollController,
+                    itemCount: results.length,
+                    itemBuilder: (context, index) {
+                      final task = results[index];
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: TaskCard(
+                          task: task,
+                          isSelected: false,
+                          onTap: () => _openTaskDetailFromCalendar(task),
+                          onToggle: () => _toggleTask(task),
+                          onEditTitle:
+                              _saving ? null : () => _promptEditTaskTitle(task),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      );
+    }
+
     if (isTasks) {
       final isTrashView = _showTrash;
       final isChecklistView = false;
@@ -732,26 +948,40 @@ class _TaskPageState extends State<TaskPage> {
               onToggle: () => _toggleTask(task),
               onEditTitle: _saving ? null : () => _promptEditTaskTitle(task),
             );
+            final feedback = Material(
+              color: Colors.transparent,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 420),
+                child: Opacity(opacity: 0.95, child: card),
+              ),
+            );
+            final draggable = _useAndroidUi
+                ? LongPressDraggable<Task>(
+                    data: task,
+                    onDragStarted: () => _setTaskDragActive(true),
+                    onDragEnd: (_) => _setTaskDragActive(false),
+                    onDragCompleted: () => _setTaskDragActive(false),
+                    onDraggableCanceled: (_, __) => _setTaskDragActive(false),
+                    feedback: feedback,
+                    childWhenDragging: Opacity(opacity: 0.35, child: card),
+                    child: card,
+                  )
+                : Draggable<Task>(
+                    data: task,
+                    onDragStarted: () => _setTaskDragActive(true),
+                    onDragEnd: (_) => _setTaskDragActive(false),
+                    onDragCompleted: () => _setTaskDragActive(false),
+                    onDraggableCanceled: (_, __) => _setTaskDragActive(false),
+                    feedback: feedback,
+                    childWhenDragging: Opacity(opacity: 0.35, child: card),
+                    child: card,
+                  );
+            final taskCell = _wrapAndroidSwipeEditTask(task, draggable);
             return StaggeredFadeSlide(
               index: index,
               child: Padding(
                 padding: const EdgeInsets.only(bottom: 12),
-                child: Draggable<Task>(
-                  data: task,
-                  onDragStarted: () => _setTaskDragActive(true),
-                  onDragEnd: (_) => _setTaskDragActive(false),
-                  onDragCompleted: () => _setTaskDragActive(false),
-                  onDraggableCanceled: (_, __) => _setTaskDragActive(false),
-                  feedback: Material(
-                    color: Colors.transparent,
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 420),
-                      child: Opacity(opacity: 0.95, child: card),
-                    ),
-                  ),
-                  childWhenDragging: Opacity(opacity: 0.35, child: card),
-                  child: card,
-                ),
+                child: taskCell,
               ),
             );
           },
@@ -1836,12 +2066,21 @@ class _TaskPageState extends State<TaskPage> {
     _quickAddController.clear();
     FocusScope.of(context).unfocus();
     final subtasks = _buildSubtasksFromDrafts();
-    final startTime = _timeToString(_quickAddStartTime);
-    final endTime = _encodeEndTime(
-      startTime: _quickAddStartTime,
-      endTime: _quickAddEndTime,
-      explicitOffsetDays: _quickAddEndDayOffset,
-    );
+    final startTimeValue = _quickAddStartTime;
+    final endTimeValue = _quickAddEndTime;
+    final startTime = _timeToString(startTimeValue);
+    final endTime = _timeToString(endTimeValue);
+    var endDayOffset = _quickAddEndDayOffset.clamp(0, 36525);
+    if (endTime.isNotEmpty &&
+        startTimeValue != null &&
+        endTimeValue != null &&
+        endDayOffset == 0) {
+      final startMinutes = startTimeValue.hour * 60 + startTimeValue.minute;
+      final endMinutes = endTimeValue.hour * 60 + endTimeValue.minute;
+      if (endMinutes <= startMinutes) {
+        endDayOffset = 1;
+      }
+    }
     final repeatRule = _quickAddRepeat ? _buildRepeatRule() : '';
 
     final tasksToCreate = <_QuickAddTaskDraft>[];
@@ -1859,6 +2098,7 @@ class _TaskPageState extends State<TaskPage> {
             tags: _buildTagsForNewTask(parsed.tags),
             date: date,
             startTime: startTime,
+            endDayOffset: endDayOffset,
             endTime: endTime,
             repeatRule: repeatRule,
             remindAt: _buildRemindAtForDate(date, baseDate),
@@ -1874,6 +2114,7 @@ class _TaskPageState extends State<TaskPage> {
           tags: _buildTagsForNewTask(parsed.tags),
           date: parsed.dateOverride ?? _quickAddDate,
           startTime: startTime,
+          endDayOffset: endDayOffset,
           endTime: endTime,
           repeatRule: repeatRule,
           remindAt: _buildSingleRemindAt(),
@@ -1926,12 +2167,15 @@ class _TaskPageState extends State<TaskPage> {
         _quickAddDate ?? DateTime(now.year, now.month, now.day);
     final baseDay = DateTime(base.year, base.month, base.day);
     final initialDate =
-        baseDay.add(Duration(days: _quickAddEndDayOffset.clamp(0, 1)));
+        baseDay.add(Duration(days: _quickAddEndDayOffset.clamp(0, 36525)));
+    final maxDate = DateTime(2100);
+    final safeInitialDate =
+        initialDate.isAfter(maxDate) ? maxDate : initialDate;
     final pickedDate = await showDatePicker(
       context: context,
-      initialDate: initialDate,
+      initialDate: safeInitialDate,
       firstDate: baseDay,
-      lastDate: baseDay.add(const Duration(days: 1)),
+      lastDate: maxDate,
     );
     if (pickedDate == null) return;
     final pickedTime = await showTimePicker(
@@ -1942,8 +2186,9 @@ class _TaskPageState extends State<TaskPage> {
     setState(() {
       final pickedDay =
           DateTime(pickedDate.year, pickedDate.month, pickedDate.day);
+      if (_quickAddDate == null) _quickAddDate = baseDay;
       _quickAddEndDayOffset =
-          pickedDay.difference(baseDay).inDays.clamp(0, 1);
+          pickedDay.difference(baseDay).inDays.clamp(0, 36525);
       if (pickedTime != null) _quickAddEndTime = pickedTime;
     });
   }
@@ -1961,10 +2206,10 @@ class _TaskPageState extends State<TaskPage> {
   String _formatQuickAddEndDateTime(BuildContext context) {
     final time = _quickAddEndTime;
     if (time == null) return '未设置';
-    final offsetDays = _quickAddEndDayOffset.clamp(0, 1);
+    final offsetDays = _quickAddEndDayOffset.clamp(0, 36525);
     final baseDate = _quickAddDate;
     final dateLabel = baseDate == null
-        ? (offsetDays > 0 ? '次日' : '')
+        ? (offsetDays > 0 ? '+$offsetDays天' : '')
         : DateFormat('M月d日')
             .format(baseDate.add(Duration(days: offsetDays)));
     final timeLabel = time.format(context);
@@ -1977,32 +2222,6 @@ class _TaskPageState extends State<TaskPage> {
     final hour = time.hour.toString().padLeft(2, '0');
     final minute = time.minute.toString().padLeft(2, '0');
     return '$hour:$minute';
-  }
-
-  String _encodeEndTime({
-    required TimeOfDay? startTime,
-    required TimeOfDay? endTime,
-    required int explicitOffsetDays,
-  }) {
-    final end = endTime;
-    if (end == null) return '';
-    var offsetDays = explicitOffsetDays.clamp(0, 1);
-
-    final start = startTime;
-    if (start != null) {
-      final startMinutes = start.hour * 60 + start.minute;
-      final endMinutes = end.hour * 60 + end.minute;
-      if (offsetDays == 0 && endMinutes == 0 && startMinutes > 0) {
-        return '24:00';
-      }
-      if (offsetDays == 0 && endMinutes <= startMinutes) {
-        offsetDays = 1;
-      }
-    }
-
-    final timeValue = _timeToString(end);
-    if (offsetDays == 0) return timeValue;
-    return '$timeValue+$offsetDays';
   }
 
   String _repeatSummary() {
@@ -2835,7 +3054,15 @@ class _TaskPageState extends State<TaskPage> {
   }
 
   void _setFilter(TaskFilter filter) {
-    if (_filter == filter) return;
+    final shouldCloseChecklist = _activeChecklistId != null;
+    final shouldCloseTrash = _showTrash;
+    final shouldClearSelection = _selectedTaskId != null;
+    if (_filter == filter &&
+        !shouldCloseChecklist &&
+        !shouldCloseTrash &&
+        !shouldClearSelection) {
+      return;
+    }
     setState(() {
       _filter = filter;
       _activeChecklistId = null;
@@ -3060,6 +3287,7 @@ class _TaskPageState extends State<TaskPage> {
     if (!mounted) return;
     if (confirmed != true) return;
 
+    final snapshot = _undoEnabled ? item : null;
     setState(() => _saving = true);
     try {
       await widget.apiClient
@@ -3070,9 +3298,38 @@ class _TaskPageState extends State<TaskPage> {
         _checklistItems[item.listId] =
             items.where((it) => it.id != item.id).toList();
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('已删除事项。')),
-      );
+      if (snapshot != null) {
+        _queueUndo(
+          message: '已删除事项。',
+          onUndo: () async {
+            final created = await widget.apiClient.createChecklistItem(
+              listId: snapshot.listId,
+              title: snapshot.title,
+              notes: snapshot.notes,
+              columnId: snapshot.columnId,
+            );
+            final restored = snapshot.completed
+                ? await widget.apiClient.updateChecklistItem(
+                    listId: snapshot.listId,
+                    itemId: created.id,
+                    completed: true,
+                  )
+                : created;
+            if (!mounted) return;
+            setState(() {
+              final items = _checklistItems[snapshot.listId] ?? <ChecklistItem>[];
+              _checklistItems[snapshot.listId] = [...items, restored];
+            });
+          },
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('已删除事项。'),
+            duration: Duration(seconds: 1),
+          ),
+        );
+      }
     } on UnauthorizedException {
       widget.onLogout();
     } catch (_) {
@@ -3087,6 +3344,7 @@ class _TaskPageState extends State<TaskPage> {
 
   Future<bool> _moveTaskToTrash(Task task) async {
     if (_saving) return false;
+    final snapshot = _undoEnabled ? task.copyWith() : null;
     setState(() => _saving = true);
     try {
       await widget.apiClient.deleteTask(task.id);
@@ -3096,21 +3354,23 @@ class _TaskPageState extends State<TaskPage> {
       }
       await _loadTasks();
       if (!context.mounted) return false;
-      final controller = ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text('已移入回收站。'),
-          duration: const Duration(seconds: 1),
-          action: SnackBarAction(
-            label: '查看',
-            onPressed: _openTrash,
+      if (snapshot != null) {
+        _queueUndo(
+          message: '已移入回收站。',
+          onUndo: () => _applyTaskSnapshot(snapshot),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('已移入回收站。'),
+            duration: const Duration(seconds: 1),
+            action: SnackBarAction(
+              label: '查看',
+              onPressed: _openTrash,
+            ),
           ),
-        ),
-      );
-      Future.delayed(const Duration(seconds: 1), () {
-        if (!context.mounted) return;
-        controller.close();
-        ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      });
+        );
+      }
       return true;
     } on UnauthorizedException {
       widget.onLogout();
@@ -3381,30 +3641,95 @@ class _TaskPageState extends State<TaskPage> {
   }
 
   Future<void> _toggleActivity(TimeActivity activity) async {
-    setState(() => _savingTime = true);
-    try {
-      final running = _runningEntries.where((entry) => entry.isRunning).toList()
-        ..sort((a, b) => b.startedAt.compareTo(a.startedAt));
-      final wasRunning =
-          running.any((entry) => entry.activityId == activity.id);
+    if (_savingTime) return;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final running = _runningEntries.where((entry) => entry.isRunning).toList()
+      ..sort((a, b) => b.startedAt.compareTo(a.startedAt));
+    final wasRunning = running.any((entry) => entry.activityId == activity.id);
 
-      if (running.isNotEmpty) {
-        final stopped = await Future.wait(
-            running.map((entry) => widget.apiClient.stopEntry(entry.id)));
+    final previousRunning = List<TimeEntry>.from(_runningEntries);
+    final previousEntries = List<TimeEntry>.from(_timeEntries);
+
+    final optimisticStopped = running
+        .map(
+          (entry) => TimeEntry(
+            id: entry.id,
+            activityId: entry.activityId,
+            taskId: entry.taskId,
+            startedAt: entry.startedAt,
+            endedAt: nowMs,
+            durationMs: null,
+            note: entry.note,
+            tags: entry.tags,
+            createdAt: entry.createdAt,
+            updatedAt: nowMs,
+            deletedAt: entry.deletedAt,
+          ),
+        )
+        .toList();
+
+    final optimisticStartId = wasRunning ? null : 'optimistic_$nowMs';
+    final optimisticStartEntry = optimisticStartId == null
+        ? null
+        : TimeEntry(
+            id: optimisticStartId,
+            activityId: activity.id,
+            taskId: activity.taskId,
+            startedAt: nowMs,
+            endedAt: null,
+            durationMs: null,
+            note: '',
+            tags: const <String>[],
+            createdAt: nowMs,
+            updatedAt: nowMs,
+            deletedAt: null,
+          );
+
+    setState(() {
+      _savingTime = true;
+      _runningEntries =
+          optimisticStartEntry == null ? <TimeEntry>[] : [optimisticStartEntry];
+      _timeEntries = _mergeTimeEntries(_timeEntries, optimisticStopped);
+      if (optimisticStartEntry != null) {
+        _timeEntries = _mergeTimeEntries(_timeEntries, [optimisticStartEntry]);
+      }
+      _lastTimeSync = DateTime.now();
+    });
+
+    try {
+      final stopped = running.isEmpty
+          ? const <TimeEntry>[]
+          : await Future.wait(
+              running.map(
+                (entry) =>
+                    widget.apiClient.stopEntry(entry.id, endedAt: nowMs),
+              ),
+            );
+
+      if (wasRunning) {
+        if (!mounted) return;
         setState(() {
           _runningEntries = <TimeEntry>[];
           _timeEntries = _mergeTimeEntries(_timeEntries, stopped);
           _lastTimeSync = DateTime.now();
         });
+        return;
       }
 
-      if (wasRunning) return;
       final entry = await widget.apiClient.startEntry(
         activityId: activity.id,
         taskId: activity.taskId,
+        startedAt: nowMs,
       );
+      if (!mounted) return;
       setState(() {
+        if (optimisticStartId != null) {
+          _timeEntries = _timeEntries
+              .where((candidate) => candidate.id != optimisticStartId)
+              .toList();
+        }
         _runningEntries = [entry];
+        _timeEntries = _mergeTimeEntries(_timeEntries, stopped);
         _timeEntries = _mergeTimeEntries(_timeEntries, [entry]);
         _lastTimeSync = DateTime.now();
       });
@@ -3412,6 +3737,10 @@ class _TaskPageState extends State<TaskPage> {
       widget.onLogout();
     } catch (_) {
       if (!context.mounted) return;
+      setState(() {
+        _runningEntries = previousRunning;
+        _timeEntries = previousEntries;
+      });
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('计时操作失败。')),
       );
@@ -3551,9 +3880,11 @@ class _TaskPageState extends State<TaskPage> {
   }
 
   Future<void> _deleteActivity(TimeActivity activity) async {
+    final snapshot = _undoEnabled ? activity : null;
     setState(() => _savingTime = true);
     try {
       await widget.apiClient.deleteActivity(activity.id);
+      if (!mounted) return;
       setState(() {
         _activities =
             _activities.where((item) => item.id != activity.id).toList();
@@ -3562,6 +3893,25 @@ class _TaskPageState extends State<TaskPage> {
             .toList();
         _lastTimeSync = DateTime.now();
       });
+      if (snapshot != null) {
+        _queueUndo(
+          message: '已删除事件。',
+          onUndo: () async {
+            await widget.apiClient.updateActivity(
+              snapshot.id,
+              clearDeletedAt: true,
+            );
+            await _loadTimeTracking();
+          },
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('已删除事件。'),
+            duration: Duration(seconds: 1),
+          ),
+        );
+      }
     } on UnauthorizedException {
       widget.onLogout();
     } catch (_) {
@@ -3581,11 +3931,25 @@ class _TaskPageState extends State<TaskPage> {
     try {
       for (final draft in drafts) {
         final defaults = _resolveTaskDefaults(draft.date);
+        String resolveEndDate() {
+          final dueDate = defaults.dueDate.trim();
+          if (dueDate.isEmpty) return '';
+          if (draft.endTime.trim().isEmpty) return '';
+          try {
+            final start = _dateFormatter.parseStrict(dueDate);
+            final offset = draft.endDayOffset.clamp(0, 36525);
+            return _dateFormatter.format(start.add(Duration(days: offset)));
+          } catch (_) {
+            return '';
+          }
+        }
+
         final task = await widget.apiClient.createTask(
           title: draft.title,
           notes: draft.notes,
           dueDate: defaults.dueDate,
           startTime: draft.startTime,
+          endDate: resolveEndDate(),
           endTime: draft.endTime,
           tags: draft.tags,
           priority: draft.priority,
@@ -3602,6 +3966,7 @@ class _TaskPageState extends State<TaskPage> {
         _lastSync = DateTime.now();
         if (created.isNotEmpty) _selectedTaskId = created.last.id;
       });
+      unawaited(_syncLocalTaskReminders());
     } on UnauthorizedException {
       widget.onLogout();
     } catch (e) {
@@ -3657,26 +4022,12 @@ class _TaskPageState extends State<TaskPage> {
   }
 
   Future<void> _toggleTask(Task task) async {
-    setState(() => _saving = true);
-    try {
-      final updated = await widget.apiClient.updateTask(
-        task.id,
-        status: task.isCompleted ? 'todo' : 'completed',
-      );
-      setState(() {
-        _tasks = _tasks.map((t) => t.id == task.id ? updated : t).toList();
-        _lastSync = DateTime.now();
-      });
-    } on UnauthorizedException {
-      widget.onLogout();
-    } catch (_) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('更新任务失败。')),
-      );
-    } finally {
-      if (mounted) setState(() => _saving = false);
-    }
+    if (_saving) return;
+    await _updateTaskFromDetail(
+      task,
+      status: task.isCompleted ? 'todo' : 'completed',
+      undoMessage: task.isCompleted ? '已恢复为待办。' : '已完成任务。',
+    );
   }
 
   Future<void> _toggleSubtask(Task task, TaskSubtask subtask) async {
@@ -3690,27 +4041,13 @@ class _TaskPageState extends State<TaskPage> {
     final allDone = updatedSubtasks.isNotEmpty &&
         updatedSubtasks.every((item) => item.completed);
     final status = allDone ? 'completed' : 'todo';
-    setState(() => _saving = true);
-    try {
-      final updated = await widget.apiClient.updateTask(
-        task.id,
-        status: status,
-        subtasks: updatedSubtasks,
-      );
-      setState(() {
-        _tasks = _tasks.map((t) => t.id == task.id ? updated : t).toList();
-        _lastSync = DateTime.now();
-      });
-    } on UnauthorizedException {
-      widget.onLogout();
-    } catch (_) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('更新子任务失败。')),
-      );
-    } finally {
-      if (mounted) setState(() => _saving = false);
-    }
+    if (_saving) return;
+    await _updateTaskFromDetail(
+      task,
+      status: status,
+      subtasks: updatedSubtasks,
+      undoMessage: '已更新子任务。',
+    );
   }
 
   Future<void> _applyDropToFilter(Task task, TaskFilter target) async {
@@ -3786,6 +4123,7 @@ class _TaskPageState extends State<TaskPage> {
     String? status,
     String? dueDate,
     String? startTime,
+    String? endDate,
     String? endTime,
     List<String>? tags,
     List<TaskSubtask>? subtasks,
@@ -3795,6 +4133,8 @@ class _TaskPageState extends State<TaskPage> {
     bool clearRemindAt = false,
     String? repeatRule,
     bool clearDeletedAt = false,
+    bool allowUndo = true,
+    String? undoMessage,
   }) async {
     setState(() => _saving = true);
     try {
@@ -3805,6 +4145,7 @@ class _TaskPageState extends State<TaskPage> {
         status: status,
         dueDate: dueDate,
         startTime: startTime,
+        endDate: endDate,
         endTime: endTime,
         tags: tags,
         subtasks: subtasks,
@@ -3819,6 +4160,7 @@ class _TaskPageState extends State<TaskPage> {
         _tasks = _tasks.map((t) => t.id == task.id ? updated : t).toList();
         _lastSync = DateTime.now();
       });
+      unawaited(_syncLocalTaskReminders());
     } on UnauthorizedException {
       widget.onLogout();
     } catch (_) {
@@ -3883,6 +4225,7 @@ class _TaskPageState extends State<TaskPage> {
         _lastSync = DateTime.now();
         if (!hasSelected) _selectedTaskId = null;
       });
+      unawaited(_syncLocalTaskReminders());
     } on UnauthorizedException {
       widget.onLogout();
     } catch (e) {
@@ -3911,17 +4254,26 @@ class _TaskPageState extends State<TaskPage> {
     try {
       final dueDate = _dateFormatter.format(date);
       final start = _timeToString(startTime);
-      String end = '';
+      String endDate = '';
+      String endTime = '';
       if (startTime != null) {
-        final startMinutes = startTime.hour * 60 + startTime.minute;
-        final endTotalMinutes = startMinutes + 15;
-        end = _encodeEndTimeFromTotalMinutes(endTotalMinutes);
+        final startAt = DateTime(
+          date.year,
+          date.month,
+          date.day,
+          startTime.hour,
+          startTime.minute,
+        );
+        final endAt = startAt.add(const Duration(minutes: 15));
+        endDate = _dateFormatter.format(endAt);
+        endTime = _timeToString(TimeOfDay.fromDateTime(endAt));
       }
       final created = await widget.apiClient.createTask(
         title: title,
         dueDate: dueDate,
         startTime: start,
-        endTime: end,
+        endDate: endDate,
+        endTime: endTime,
         inbox: false,
         status: 'todo',
       );
@@ -3931,6 +4283,7 @@ class _TaskPageState extends State<TaskPage> {
         _lastSync = DateTime.now();
         _selectedTaskId = created.id;
       });
+      unawaited(_syncLocalTaskReminders());
       return created;
     } on UnauthorizedException {
       widget.onLogout();
@@ -3949,61 +4302,77 @@ class _TaskPageState extends State<TaskPage> {
     TimeOfDay? endTime,
   }) async {
     if (_saving) return;
-    setState(() => _saving = true);
-    try {
-      final dueDate = _dateFormatter.format(date);
-      final start = startTime == null ? '' : _timeToString(startTime);
-      var end = '';
-      if (startTime != null) {
-        final startMinutes = startTime.hour * 60 + startTime.minute;
-        int endTotalMinutes;
-        if (endTime != null) {
-          final pickedMinutes = endTime.hour * 60 + endTime.minute;
-          if (pickedMinutes == 0 && startMinutes > 0) {
-            endTotalMinutes = 24 * 60;
-          } else if (pickedMinutes <= startMinutes) {
-            endTotalMinutes = 24 * 60 + pickedMinutes;
-          } else {
-            endTotalMinutes = pickedMinutes;
+    final dueDate = _dateFormatter.format(date);
+    if (startTime == null) {
+      final wasAllDay = task.startTime.trim().isEmpty;
+      String nextEndDate = '';
+      if (wasAllDay) {
+        try {
+          final startDay = _dateFormatter.parseStrict(task.dueDate);
+          final endKey = task.endDate.trim();
+          final endDay = endKey.isNotEmpty
+              ? _dateFormatter.parseStrict(endKey)
+              : startDay;
+          final spanDays = endDay.difference(startDay).inDays;
+          if (spanDays > 0) {
+            nextEndDate =
+                _dateFormatter.format(date.add(Duration(days: spanDays)));
           }
-        } else {
-          final duration = _taskDurationMinutes(task) ?? 15;
-          endTotalMinutes = startMinutes + duration;
-        }
-        endTotalMinutes = endTotalMinutes.clamp(startMinutes + 15, 48 * 60);
-        end = _encodeEndTimeFromTotalMinutes(endTotalMinutes);
+        } catch (_) {}
       }
-
-      final updated = await widget.apiClient.updateTask(
-        task.id,
+      await _updateTaskFromDetail(
+        task,
         dueDate: dueDate,
-        startTime: start,
-        endTime: end,
+        startTime: '',
+        endDate: nextEndDate,
+        endTime: '',
         inbox: false,
+        undoMessage: '已更新日程。',
       );
-      final next = _tasks.map((t) => t.id == task.id ? updated : t).toList()
-        ..sort(_sortTask);
-      setState(() {
-        _tasks = next;
-        _lastSync = DateTime.now();
-      });
-    } on UnauthorizedException {
-      widget.onLogout();
-    } catch (_) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('更新任务失败。')),
-      );
-    } finally {
-      if (mounted) setState(() => _saving = false);
+      return;
     }
-  }
 
-  String _minutesToTimeString(int minutes) {
-    final clamped = minutes.clamp(0, 24 * 60);
-    final hour = (clamped ~/ 60).toString().padLeft(2, '0');
-    final minute = (clamped % 60).toString().padLeft(2, '0');
-    return '$hour:$minute';
+    final start = _timeToString(startTime);
+    final startAt = DateTime(
+      date.year,
+      date.month,
+      date.day,
+      startTime.hour,
+      startTime.minute,
+    );
+
+    DateTime endAt;
+    if (endTime != null) {
+      final startMinutes = startTime.hour * 60 + startTime.minute;
+      final pickedMinutes = endTime.hour * 60 + endTime.minute;
+      final crossesMidnight =
+          (pickedMinutes == 0 && startMinutes > 0) ||
+              pickedMinutes <= startMinutes;
+      endAt = DateTime(
+        date.year,
+        date.month,
+        date.day,
+        endTime.hour,
+        endTime.minute,
+      ).add(Duration(days: crossesMidnight ? 1 : 0));
+      if (endAt.difference(startAt).inMinutes < 15) {
+        endAt = startAt.add(const Duration(minutes: 15));
+      }
+    } else {
+      final durationMinutes =
+          (_taskDurationMinutes(task) ?? 15).clamp(15, 36525 * 24 * 60);
+      endAt = startAt.add(Duration(minutes: durationMinutes));
+    }
+
+    await _updateTaskFromDetail(
+      task,
+      dueDate: dueDate,
+      startTime: start,
+      endDate: _dateFormatter.format(endAt),
+      endTime: _timeToString(TimeOfDay.fromDateTime(endAt)),
+      inbox: false,
+      undoMessage: '已更新日程。',
+    );
   }
 
   int? _parseTimeMinutes(String value) {
@@ -4031,45 +4400,78 @@ class _TaskPageState extends State<TaskPage> {
   }
 
   int? _taskDurationMinutes(Task task) {
+    final startDayKey = task.dueDate.trim();
+    if (startDayKey.isEmpty) return null;
     final startMinutes = _parseTimeMinutes(task.startTime);
     if (startMinutes == null) return null;
     final endRaw = task.endTime.trim();
     if (endRaw.isEmpty) return null;
 
-    final explicitOffset = _parseEndOffsetDays(endRaw);
     final plusIndex = endRaw.lastIndexOf('+');
     final hasExplicitOffset = plusIndex > 0;
+    final explicitOffset = hasExplicitOffset
+        ? (int.tryParse(endRaw.substring(plusIndex + 1).trim()) ?? 0)
+        : 0;
     final timePart =
         (hasExplicitOffset ? endRaw.substring(0, plusIndex) : endRaw).trim();
-    final endMinutes = _parseTimeMinutes(timePart);
+    var endMinutes = _parseTimeMinutes(timePart);
     if (endMinutes == null) return null;
 
-    int endTotalMinutes;
-    if (timePart == '24:00') {
-      endTotalMinutes = 24 * 60;
+    DateTime? startDay;
+    try {
+      startDay = _dateFormatter.parseStrict(startDayKey);
+    } catch (_) {
+      startDay = DateTime.tryParse('${startDayKey}T00:00:00');
+    }
+    if (startDay == null) return null;
+
+    DateTime endDay = startDay;
+    final endDateKey = task.endDate.trim();
+    if (endDateKey.isNotEmpty) {
+      try {
+        final parsed = _dateFormatter.parseStrict(endDateKey);
+        if (!parsed.isBefore(startDay)) endDay = parsed;
+      } catch (_) {
+        final parsed = DateTime.tryParse('${endDateKey}T00:00:00');
+        if (parsed != null && !parsed.isBefore(startDay)) endDay = parsed;
+      }
     } else if (explicitOffset > 0) {
-      endTotalMinutes = explicitOffset * 24 * 60 + endMinutes;
-    } else if (endMinutes <= startMinutes) {
-      endTotalMinutes = 24 * 60 + endMinutes;
+      endDay = startDay.add(Duration(days: explicitOffset));
     } else {
-      endTotalMinutes = endMinutes;
+      final legacyOffset = _parseEndOffsetDays(endRaw);
+      if (legacyOffset > 0) {
+        endDay = startDay.add(Duration(days: legacyOffset));
+      }
     }
 
-    final duration = endTotalMinutes - startMinutes;
+    if (endMinutes == 24 * 60 || timePart == '24:00') {
+      endMinutes = 0;
+      endDay = endDay.add(const Duration(days: 1));
+    } else if (endDay.year == startDay.year &&
+        endDay.month == startDay.month &&
+        endDay.day == startDay.day &&
+        endMinutes <= startMinutes) {
+      endDay = endDay.add(const Duration(days: 1));
+    }
+
+    final startAt = DateTime(
+      startDay.year,
+      startDay.month,
+      startDay.day,
+      startMinutes ~/ 60,
+      startMinutes % 60,
+    );
+    final endAt = DateTime(
+      endDay.year,
+      endDay.month,
+      endDay.day,
+      endMinutes ~/ 60,
+      endMinutes % 60,
+    );
+
+    final duration = endAt.difference(startAt).inMinutes;
     if (duration <= 0) return null;
     return duration;
-  }
-
-  String _encodeEndTimeFromTotalMinutes(int endTotalMinutes) {
-    const dayMinutes = 24 * 60;
-    if (endTotalMinutes <= dayMinutes) {
-      return _minutesToTimeString(endTotalMinutes);
-    }
-    final offsetDays = (endTotalMinutes ~/ dayMinutes).clamp(0, 1);
-    final minuteOfDay = endTotalMinutes % dayMinutes;
-    if (offsetDays == 1 && minuteOfDay == 0) return '24:00';
-    final timeValue = _minutesToTimeString(minuteOfDay);
-    return '$timeValue+$offsetDays';
   }
 
   void _openTaskDetailFromCalendar(Task task) {
@@ -4090,6 +4492,7 @@ class _TaskPageState extends State<TaskPage> {
                 String? status,
                 String? dueDate,
                 String? startTime,
+                String? endDate,
                 String? endTime,
                 List<String>? tags,
                 List<TaskSubtask>? subtasks,
@@ -4107,6 +4510,7 @@ class _TaskPageState extends State<TaskPage> {
                   status: status,
                   dueDate: dueDate,
                   startTime: startTime,
+                  endDate: endDate,
                   endTime: endTime,
                   tags: tags,
                   subtasks: subtasks,
@@ -4144,6 +4548,44 @@ class _TaskPageState extends State<TaskPage> {
           ),
         );
       },
+    );
+  }
+
+  Widget _wrapAndroidSwipeEditTask(Task task, Widget child) {
+    if (!_useAndroidUi || task.deletedAt != null) return child;
+    final accent = AppColors.accentCool;
+    return Dismissible(
+      key: ValueKey('task_swipe_edit_${task.id}'),
+      direction: DismissDirection.endToStart,
+      dismissThresholds: const {DismissDirection.endToStart: 0.28},
+      confirmDismiss: (direction) async {
+        if (direction != DismissDirection.endToStart) return false;
+        if (_saving) return false;
+        HapticFeedback.selectionClick();
+        _openTaskDetailFromCalendar(task);
+        return false;
+      },
+      background: const SizedBox.shrink(),
+      secondaryBackground: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 18),
+        alignment: Alignment.centerRight,
+        color: accent.withOpacity(0.12),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.edit, size: 20, color: accent),
+            const SizedBox(width: 8),
+            Text(
+              '编辑',
+              style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                    fontWeight: FontWeight.w800,
+                    color: accent,
+                  ),
+            ),
+          ],
+        ),
+      ),
+      child: child,
     );
   }
 
@@ -5121,6 +5563,7 @@ typedef TaskUpdateCallback = Future<void> Function(
   String? status,
   String? dueDate,
   String? startTime,
+  String? endDate,
   String? endTime,
   List<String>? tags,
   List<TaskSubtask>? subtasks,
@@ -5431,15 +5874,74 @@ class _TaskDetailPanel extends StatelessWidget {
         lastDate: DateTime(2100),
       );
       if (pickedDate == null) return;
+      final currentStartTime = task.startTime.trim();
       final pickedTime = await showTimePicker(
         context: context,
-        initialTime: parseTime(task.startTime) ?? TimeOfDay.now(),
+        initialTime: parseTime(currentStartTime) ?? TimeOfDay.now(),
       );
       if (!context.mounted) return;
+      final nextDueDate = DateFormat('yyyy-MM-dd').format(pickedDate);
+      final nextStartTime =
+          pickedTime == null ? currentStartTime : formatTime(pickedTime);
+
+      final hasEnd = task.endTime.trim().isNotEmpty;
+      String? nextEndDate;
+      String? nextEndTime;
+      if (hasEnd) {
+        final oldStartDate = parseDate(task.dueDate);
+        final oldStartTime = parseTime(task.startTime);
+        final oldEndDate = parseDate(
+          task.endDate.trim().isNotEmpty ? task.endDate : task.dueDate,
+        );
+        final oldEndTime = parseTime(task.endTime);
+        final newStartTime = parseTime(nextStartTime);
+        if (oldStartDate != null &&
+            oldStartTime != null &&
+            oldEndDate != null &&
+            oldEndTime != null &&
+            newStartTime != null) {
+          final oldStartAt = DateTime(
+            oldStartDate.year,
+            oldStartDate.month,
+            oldStartDate.day,
+            oldStartTime.hour,
+            oldStartTime.minute,
+          );
+          var oldEndAt = DateTime(
+            oldEndDate.year,
+            oldEndDate.month,
+            oldEndDate.day,
+            oldEndTime.hour,
+            oldEndTime.minute,
+          );
+          if (!oldEndAt.isAfter(oldStartAt)) {
+            oldEndAt = oldEndAt.add(const Duration(days: 1));
+          }
+          final duration = oldEndAt.difference(oldStartAt);
+          final newStartAt = DateTime(
+            pickedDate.year,
+            pickedDate.month,
+            pickedDate.day,
+            newStartTime.hour,
+            newStartTime.minute,
+          );
+          final newEndAt = newStartAt.add(duration);
+          nextEndDate = DateFormat('yyyy-MM-dd').format(newEndAt);
+          nextEndTime = formatTime(TimeOfDay.fromDateTime(newEndAt));
+        } else {
+          nextEndDate = task.endDate.trim().isNotEmpty ? task.endDate : nextDueDate;
+          nextEndTime = task.endTime.trim();
+          if (nextEndDate.compareTo(nextDueDate) < 0) {
+            nextEndDate = nextDueDate;
+          }
+        }
+      }
       await onUpdateTask(
         task,
-        dueDate: DateFormat('yyyy-MM-dd').format(pickedDate),
-        startTime: pickedTime == null ? '' : formatTime(pickedTime),
+        dueDate: nextDueDate,
+        startTime: nextStartTime,
+        endDate: nextEndDate,
+        endTime: nextEndTime,
         inbox: false,
       );
     }
@@ -5449,30 +5951,12 @@ class _TaskDetailPanel extends StatelessWidget {
         task,
         dueDate: '',
         startTime: '',
+        endDate: '',
         endTime: '',
         inbox: task.isCompleted
             ? false
             : (task.checklistId != null ? false : true),
       );
-    }
-
-    int _currentEndOffsetDays() {
-      final raw = task.endTime.trim();
-      if (raw.isEmpty) return 0;
-      final plusIndex = raw.lastIndexOf('+');
-      if (plusIndex > 0) {
-        final parsed = int.tryParse(raw.substring(plusIndex + 1).trim());
-        return (parsed ?? 0).clamp(0, 1);
-      }
-      if (raw == '24:00') return 1;
-      final startMinutes = _parseTimeMinutes(task.startTime);
-      final endMinutes = _parseTimeMinutes(task.endTime);
-      if (startMinutes != null &&
-          endMinutes != null &&
-          endMinutes <= startMinutes) {
-        return 1;
-      }
-      return 0;
     }
 
     Future<void> pickEndDateTime() async {
@@ -5484,49 +5968,51 @@ class _TaskDetailPanel extends StatelessWidget {
         return;
       }
       final startDay = DateTime(startDate.year, startDate.month, startDate.day);
-      final offsetDays = _currentEndOffsetDays();
-      final initialDate = startDay.add(Duration(days: offsetDays));
+      final existingEndDate = parseDate(task.endDate) ?? startDay;
+      final maxDate = DateTime(2100);
+      final initialDate =
+          existingEndDate.isBefore(startDay) ? startDay : existingEndDate;
+      final safeInitialDate =
+          initialDate.isAfter(maxDate) ? maxDate : initialDate;
 
       final pickedDate = await showDatePicker(
         context: context,
-        initialDate: initialDate,
+        initialDate: safeInitialDate,
         firstDate: startDay,
-        lastDate: startDay.add(const Duration(days: 1)),
+        lastDate: maxDate,
       );
       if (pickedDate == null) return;
       final pickedTime = await showTimePicker(
         context: context,
         initialTime: parseTime(task.endTime) ?? TimeOfDay.now(),
       );
+      if (!context.mounted) return;
       if (pickedTime == null) return;
 
-      var nextOffset = DateTime(
+      var endDay = DateTime(
         pickedDate.year,
         pickedDate.month,
         pickedDate.day,
-      ).difference(startDay).inDays.clamp(0, 1);
-
+      );
       final startMinutes = _parseTimeMinutes(task.startTime);
       final endMinutes = pickedTime.hour * 60 + pickedTime.minute;
-      var endValue = formatTime(pickedTime);
-
-      if (nextOffset == 0 && startMinutes != null) {
-        if (endMinutes == 0 && startMinutes > 0) {
-          endValue = '24:00';
-        } else if (endMinutes <= startMinutes) {
-          nextOffset = 1;
-        }
+      if (endDay.year == startDay.year &&
+          endDay.month == startDay.month &&
+          endDay.day == startDay.day &&
+          startMinutes != null &&
+          endMinutes <= startMinutes) {
+        endDay = startDay.add(const Duration(days: 1));
       }
 
-      if (endValue != '24:00' && nextOffset > 0) {
-        endValue = '$endValue+$nextOffset';
-      }
-
-      await onUpdateTask(task, endTime: endValue);
+      await onUpdateTask(
+        task,
+        endDate: DateFormat('yyyy-MM-dd').format(endDay),
+        endTime: formatTime(pickedTime),
+      );
     }
 
     Future<void> clearEndDateTime() async {
-      await onUpdateTask(task, endTime: '');
+      await onUpdateTask(task, endDate: '', endTime: '');
     }
 
     Future<void> pickRemindAt() async {
@@ -5951,44 +6437,21 @@ class _TaskDetailPanel extends StatelessWidget {
     }
 
     String formatEndDateTimeValue() {
-      final raw = task.endTime.trim();
-      if (raw.isEmpty) return '未设置';
-
-      final startDate = parseDate(task.dueDate);
-      final startDay = startDate == null
-          ? null
-          : DateTime(startDate.year, startDate.month, startDate.day);
-
-      final plusIndex = raw.lastIndexOf('+');
-      final hasExplicitOffset = plusIndex > 0;
-      final explicitOffset = hasExplicitOffset
-          ? (int.tryParse(raw.substring(plusIndex + 1).trim()) ?? 0)
-          : 0;
-
-      final timePart =
-          (hasExplicitOffset ? raw.substring(0, plusIndex) : raw).trim();
-      final startMinutes = _parseTimeMinutes(task.startTime);
-      var endMinutes = _parseTimeMinutes(timePart);
-      if (endMinutes == null) return raw;
-
-      var offsetDays = explicitOffset.clamp(0, 1);
-      var displayTime = timePart;
-      if (timePart == '24:00') {
-        offsetDays = (offsetDays + 1).clamp(0, 1);
-        endMinutes = 0;
-        displayTime = '00:00';
-      } else if (!hasExplicitOffset &&
-          startMinutes != null &&
-          endMinutes <= startMinutes) {
-        offsetDays = 1;
+      final dateRaw = task.endDate.trim();
+      final timeRaw = task.endTime.trim();
+      if (dateRaw.isEmpty && timeRaw.isEmpty) return '未设置';
+      if (timeRaw.isEmpty) {
+        return dateRaw.isEmpty ? '未设置' : formatDateValue(dateRaw);
       }
 
-      final dateLabel = startDay == null
-          ? (offsetDays > 0 ? '次日' : '')
-          : DateFormat('M月d日')
-              .format(startDay.add(Duration(days: offsetDays)));
+      final startDateKey = task.dueDate.trim();
+      final endDateKey = dateRaw.isEmpty ? startDateKey : dateRaw;
+      final dateLabel =
+          endDateKey.isEmpty || endDateKey == startDateKey
+              ? ''
+              : formatDateValue(endDateKey);
 
-      final parts = [dateLabel, displayTime].where((value) => value.isNotEmpty);
+      final parts = [dateLabel, timeRaw].where((value) => value.isNotEmpty);
       return parts.isEmpty ? '未设置' : parts.join(' ');
     }
 
@@ -6059,8 +6522,10 @@ class _TaskDetailPanel extends StatelessWidget {
           value: endAtValue,
           icon: Icons.timelapse,
           onTap: saving ? null : pickEndDateTime,
-          onClear:
-              saving || task.endTime.trim().isEmpty ? null : clearEndDateTime,
+          onClear: saving ||
+                  (task.endDate.trim().isEmpty && task.endTime.trim().isEmpty)
+              ? null
+              : clearEndDateTime,
         ),
         const SizedBox(height: 8),
         settingTile(
@@ -6255,8 +6720,20 @@ class _TaskDetailPanel extends StatelessWidget {
       final startDateLabel = DateFormat('M月d日').format(date);
       final startTime = task.startTime.trim();
       final endRaw = task.endTime.trim();
+      final endDateKey = task.endDate.trim();
 
-      if (startTime.isEmpty && endRaw.isEmpty) return startDateLabel;
+      if (startTime.isEmpty && endRaw.isEmpty) {
+        if (endDateKey.isNotEmpty) {
+          try {
+            final endDay = DateFormat('yyyy-MM-dd').parseStrict(endDateKey);
+            if (endDay.isAfter(date)) {
+              final endDateLabel = DateFormat('M月d日').format(endDay);
+              return '$startDateLabel - $endDateLabel';
+            }
+          } catch (_) {}
+        }
+        return startDateLabel;
+      }
 
       final startLabel =
           startTime.isEmpty ? startDateLabel : '$startDateLabel $startTime';
@@ -6270,10 +6747,17 @@ class _TaskDetailPanel extends StatelessWidget {
       final timePart =
           (hasExplicitOffset ? endRaw.substring(0, plusIndex) : endRaw).trim();
 
-      var offsetDays = explicitOffset.clamp(0, 1);
+      var offsetDays = explicitOffset;
+      if (endDateKey.isNotEmpty) {
+        try {
+          final parsedEndDay = DateFormat('yyyy-MM-dd').parseStrict(endDateKey);
+          offsetDays = parsedEndDay.difference(date).inDays;
+        } catch (_) {}
+      }
+      if (offsetDays < 0) offsetDays = 0;
       var displayTime = timePart;
       if (timePart == '24:00') {
-        offsetDays = 1;
+        offsetDays += 1;
         displayTime = '00:00';
       } else if (!hasExplicitOffset) {
         final startMinutes = _parseTimeMinutes(startTime);
@@ -6281,7 +6765,7 @@ class _TaskDetailPanel extends StatelessWidget {
         if (startMinutes != null &&
             endMinutes != null &&
             endMinutes <= startMinutes) {
-          offsetDays = 1;
+          if (offsetDays == 0) offsetDays = 1;
         }
       }
 
@@ -6330,6 +6814,7 @@ class _QuickAddTaskDraft {
     required this.tags,
     required this.date,
     required this.startTime,
+    required this.endDayOffset,
     required this.endTime,
     required this.repeatRule,
     required this.remindAt,
@@ -6343,6 +6828,7 @@ class _QuickAddTaskDraft {
   final String notes;
   final DateTime? date;
   final String startTime;
+  final int endDayOffset;
   final String endTime;
   final String repeatRule;
   final int? remindAt;
@@ -6379,4 +6865,11 @@ class _ParsedQuickAddInput {
   final String title;
   final List<String> tags;
   final DateTime? dateOverride;
+}
+
+class _UndoAction {
+  const _UndoAction({required this.message, required this.onUndo});
+
+  final String message;
+  final Future<void> Function() onUndo;
 }

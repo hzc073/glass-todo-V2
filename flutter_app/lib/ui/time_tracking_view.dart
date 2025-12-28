@@ -74,6 +74,7 @@ class _TimeTrackingViewState extends State<TimeTrackingView> {
     _ticker?.cancel();
     _ticker = null;
     if (!_hasRunning) return;
+    _now = DateTime.now();
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       setState(() => _now = DateTime.now());

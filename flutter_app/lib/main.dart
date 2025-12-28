@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -52,6 +53,10 @@ class _GlassTodoAppState extends State<GlassTodoApp> {
   UserSettings _userSettings = UserSettings.defaults();
   ThemeMode _themeMode = ThemeMode.system;
 
+  bool _fcmHandlersBound = false;
+  StreamSubscription<RemoteMessage>? _fcmForegroundSub;
+  StreamSubscription<RemoteMessage>? _fcmOpenedSub;
+
   @override
   void initState() {
     super.initState();
@@ -62,6 +67,13 @@ class _GlassTodoAppState extends State<GlassTodoApp> {
     if (widget.authStore.isLoggedIn) {
       _loadUserSettings();
     }
+  }
+
+  @override
+  void dispose() {
+    _fcmForegroundSub?.cancel();
+    _fcmOpenedSub?.cancel();
+    super.dispose();
   }
 
   @override
@@ -119,6 +131,11 @@ class _GlassTodoAppState extends State<GlassTodoApp> {
 
   Future<void> _handleLogout() async {
     await _fcmController.disable();
+    await _fcmForegroundSub?.cancel();
+    await _fcmOpenedSub?.cancel();
+    _fcmForegroundSub = null;
+    _fcmOpenedSub = null;
+    _fcmHandlersBound = false;
     await widget.authStore.clear();
     setState(() {});
   }
@@ -142,10 +159,42 @@ class _GlassTodoAppState extends State<GlassTodoApp> {
         _userSettings = settings;
         _themeMode = _themeModeFor(settings.preferences.theme);
       });
-      unawaited(_fcmController.syncFromSettings(settings));
+      unawaited(_syncFcmFromSettings(settings));
     } on UnauthorizedException {
       await _handleLogout();
     } catch (_) {}
+  }
+
+  Future<void> _syncFcmFromSettings(UserSettings settings) async {
+    try {
+      final result = await _fcmController.syncFromSettings(settings);
+      if (!mounted) return;
+      if (result.state == FcmSyncState.enabled) {
+        _bindFcmMessageHandlers();
+      }
+    } catch (_) {}
+  }
+
+  void _bindFcmMessageHandlers() {
+    if (_fcmHandlersBound) return;
+    _fcmHandlersBound = true;
+
+    _fcmForegroundSub ??= FirebaseMessaging.onMessage.listen((message) {
+      final ctx = _navKey.currentContext;
+      if (ctx == null) return;
+      final title =
+          message.notification?.title ?? message.data['title']?.toString() ?? '通知';
+      final body =
+          message.notification?.body ?? message.data['body']?.toString() ?? '';
+      final text = body.trim().isEmpty ? title : '$title：$body';
+      ScaffoldMessenger.of(ctx).showSnackBar(
+        SnackBar(content: Text(text), duration: const Duration(seconds: 3)),
+      );
+    });
+
+    _fcmOpenedSub ??= FirebaseMessaging.onMessageOpenedApp.listen((_) {});
+
+    unawaited(FirebaseMessaging.instance.getInitialMessage().then((_) {}));
   }
 
   Future<void> _openAppSettings() async {
@@ -159,7 +208,7 @@ class _GlassTodoAppState extends State<GlassTodoApp> {
       onLogout: () => _handleLogout(),
       onSettingsApplied: (settings) {
         setState(() => _userSettings = settings);
-        unawaited(_fcmController.syncFromSettings(settings));
+        unawaited(_syncFcmFromSettings(settings));
       },
       onThemeModeChanged: (mode) {
         setState(() => _themeMode = mode);
@@ -328,7 +377,7 @@ class _GlassTodoAppState extends State<GlassTodoApp> {
     _apiClient = ApiClient(baseUrl: _apiBaseUrl, authStore: widget.authStore);
     _fcmController.updateApiClient(_apiClient);
     if (widget.authStore.isLoggedIn) {
-      unawaited(_fcmController.syncFromSettings(_userSettings));
+      unawaited(_syncFcmFromSettings(_userSettings));
     }
     setState(() {});
   }

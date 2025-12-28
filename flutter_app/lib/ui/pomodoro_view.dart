@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
@@ -41,6 +42,7 @@ class _PomodoroViewState extends State<PomodoroView> {
   final _dateKeyFmt = DateFormat('yyyy-MM-dd');
 
   Timer? _ticker;
+  late final PageController _androidPageController;
 
   bool _loading = true;
   bool _saving = false;
@@ -71,12 +73,14 @@ class _PomodoroViewState extends State<PomodoroView> {
   @override
   void initState() {
     super.initState();
+    _androidPageController = PageController();
     _bootstrap();
   }
 
   @override
   void dispose() {
     _stopTicker();
+    _androidPageController.dispose();
     super.dispose();
   }
 
@@ -105,8 +109,9 @@ class _PomodoroViewState extends State<PomodoroView> {
     final reminderPopup = prefs.getBool(_prefsKeyReminderPopup);
     final selectedTaskId = prefs.getString(_prefsKeySelectedTask);
 
+    final isAndroid = !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
     setState(() {
-      _dashboardExpanded = dashboardExpanded ?? true;
+      _dashboardExpanded = dashboardExpanded ?? (isAndroid ? false : true);
       _reminderSound = reminderSound ?? true;
       _reminderPopup = reminderPopup ?? true;
       _selectedTaskId = selectedTaskId;
@@ -456,6 +461,8 @@ class _PomodoroViewState extends State<PomodoroView> {
   Widget build(BuildContext context) {
     final width = MediaQuery.of(context).size.width;
     final twoColumn = width >= 980;
+    final isAndroid =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
     if (_loading) {
       return const Center(child: CircularProgressIndicator());
@@ -467,9 +474,29 @@ class _PomodoroViewState extends State<PomodoroView> {
       loading: _summary == null,
       summary: _summary,
       sessions: _sessions,
-      onCollapse: () => _setDashboardExpanded(false),
+      onCollapse: () {
+        if (isAndroid) {
+          _androidPageController.animateToPage(
+            0,
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOutCubic,
+          );
+          return;
+        }
+        _setDashboardExpanded(false);
+      },
       onRefresh: _refreshDashboard,
     );
+
+    if (isAndroid) {
+      return PageView(
+        controller: _androidPageController,
+        children: [
+          timerColumn,
+          dashboard,
+        ],
+      );
+    }
 
     if (!_dashboardExpanded) {
       return Stack(

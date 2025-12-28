@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -58,6 +60,8 @@ class TaskPage extends StatefulWidget {
 }
 
 class _TaskPageState extends State<TaskPage> {
+  bool _isTaskDragActive = false;
+  bool _androidQuickAddOpen = false;
   final _searchController = TextEditingController();
   final _quickAddController = TextEditingController();
   final _checklistAddController = TextEditingController();
@@ -107,6 +111,7 @@ class _TaskPageState extends State<TaskPage> {
   DateTime? _quickAddDate;
   TimeOfDay? _quickAddStartTime;
   TimeOfDay? _quickAddEndTime;
+  int _quickAddEndDayOffset = 0; // 0=同日, 1=次日
   bool _quickAddRepeat = false;
   RepeatFrequency _quickAddRepeatFrequency = RepeatFrequency.daily;
   int _quickAddRepeatCount = 1;
@@ -149,6 +154,66 @@ class _TaskPageState extends State<TaskPage> {
   List<PomodoroSession> _pomodoroSessions = [];
   int _statsFrom = 0;
   int _statsTo = 0;
+
+  bool get _useAndroidUi => !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
+  String _apiBaseUrlLabel() {
+    final raw = widget.apiClient.baseUrl.trim();
+    return raw.isEmpty ? '(未设置)' : raw;
+  }
+
+  bool _looksLikeNetworkError(Object error) {
+    if (error is TimeoutException) return true;
+    final message = error.toString();
+    return message.contains('SocketException') ||
+        message.contains('Failed host lookup') ||
+        message.contains('Connection refused') ||
+        message.contains('ClientException') ||
+        message.contains('XMLHttpRequest');
+  }
+
+  String? _tryParseServerError(String body) {
+    final trimmed = body.trim();
+    if (trimmed.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(trimmed);
+      if (decoded is Map<String, dynamic>) {
+        final value = decoded['error'] ?? decoded['message'];
+        final msg = value?.toString().trim() ?? '';
+        if (msg.isNotEmpty) return msg;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  String _describeFailure(String fallback, Object error) {
+    if (error is ApiException) {
+      final msg = _tryParseServerError(error.body) ?? error.body.trim();
+      final text = msg.isEmpty ? fallback : msg;
+      return '$text (HTTP ${error.statusCode})';
+    }
+    if (error is TimeoutException) {
+      return '$fallback：请求超时（后端：${_apiBaseUrlLabel()}）';
+    }
+    if (_looksLikeNetworkError(error)) {
+      final hint = _useAndroidUi ? '（Android 模拟器用 10.0.2.2:3000）' : '';
+      return '$fallback：无法连接后端（${_apiBaseUrlLabel()}）$hint';
+    }
+    return fallback;
+  }
+
+  void _showFailureSnackBar(String fallback, Object error) {
+    if (!mounted) return;
+    final action = _looksLikeNetworkError(error) || error is TimeoutException
+        ? SnackBarAction(label: '设置', onPressed: widget.onOpenSettings)
+        : null;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(_describeFailure(fallback, error)),
+        action: action,
+      ),
+    );
+  }
 
   @override
   void initState() {
@@ -228,7 +293,7 @@ class _TaskPageState extends State<TaskPage> {
             : isChecklistView
                 ? '清单分类任务。'
                 : _filter.description)
-        : (isTimeTracking ? '' : workspace.description);
+        : (isTimeTracking || isMatrix ? '' : workspace.description);
     String headerMetaTitle;
     String headerMetaSubtitle;
     if (isTasks) {
@@ -241,8 +306,7 @@ class _TaskPageState extends State<TaskPage> {
               : '更新于 ${DateFormat('HH:mm').format(_lastSync!)}';
     } else if (isMatrix) {
       headerMetaTitle = '${filtered.length} 个未完成';
-      headerMetaSubtitle =
-          _matrixScopeLabel(widget.userSettings.preferences.matrixScope);
+      headerMetaSubtitle = '';
     } else if (isTimeTracking) {
       final runningCount = _runningEntries.length;
       headerMetaTitle = runningCount > 0
@@ -275,34 +339,114 @@ class _TaskPageState extends State<TaskPage> {
       metaSubtitle: headerMetaSubtitle,
     );
 
-    return Column(
-      key: const ValueKey('task_detail_scroll_column'),
+    final showAndroidTrashTarget = _useAndroidUi &&
+        !_showTrash &&
+        _isTaskDragActive &&
+        !_androidQuickAddOpen;
+	    final showAndroidAddFab = _useAndroidUi &&
+	        widget.workspace == WorkspaceView.tasks &&
+	        !_showTrash &&
+	        !_isTaskDragActive &&
+	        !_androidQuickAddOpen;
+
+    final content = Stack(
       children: [
-        _buildToolbar(
-          context,
-          isTasks: isTasks || isMatrix,
+        Column(
+          key: const ValueKey('task_detail_scroll_column'),
+          children: [
+            _buildToolbar(
+              context,
+              isTasks: isTasks || isMatrix || isCalendar,
+            ),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
+                child: _buildWorkspaceBody(
+                  isTasks: isTasks,
+                  isMatrix: isMatrix,
+                  isTimeTracking: isTimeTracking,
+                  isCalendar: isCalendar,
+                  isPomodoro: isPomodoro,
+                  isStats: isStats,
+                  filtered: filtered,
+                  counts: counts,
+                  showTaskNav: showTaskNav,
+                  showInlineFilters: showInlineFilters,
+                  showDetailPanel: showDetailPanel,
+                  selectedTask: selectedTask,
+                  header: headerBlock,
+                ),
+              ),
+            ),
+          ],
         ),
-        Expanded(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
-            child: _buildWorkspaceBody(
-              isTasks: isTasks,
-              isMatrix: isMatrix,
-              isTimeTracking: isTimeTracking,
-              isCalendar: isCalendar,
-              isPomodoro: isPomodoro,
-              isStats: isStats,
-              filtered: filtered,
-              counts: counts,
-              showTaskNav: showTaskNav,
-              showInlineFilters: showInlineFilters,
-              showDetailPanel: showDetailPanel,
-              selectedTask: selectedTask,
-              header: headerBlock,
+        if (showAndroidTrashTarget || showAndroidAddFab)
+          Positioned(
+            right: 16,
+            bottom: 16,
+            child: showAndroidTrashTarget
+                ? _buildFloatingTrashTarget(context)
+                : FloatingActionButton(
+                    heroTag: 'task_add_fab',
+                    onPressed: _saving ? null : _openQuickAddSheet,
+                    backgroundColor: AppColors.accentCool,
+                    child: const Icon(Icons.add, size: 28),
+                  ),
+          ),
+        if (_useAndroidUi && _androidQuickAddOpen) ...[
+          Positioned.fill(
+            child: GestureDetector(
+              onTap: _closeAndroidQuickAdd,
+              child: Container(
+                color: Colors.black.withOpacity(0.35),
+              ),
             ),
           ),
-        ),
+          Positioned(
+            left: 14,
+            right: 14,
+            bottom: 14,
+            child: AnimatedPadding(
+              duration: const Duration(milliseconds: 160),
+              curve: Curves.easeOut,
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.of(context).viewInsets.bottom,
+              ),
+              child: SafeArea(
+                top: false,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: MediaQuery.of(context).size.height * 0.78,
+                  ),
+                  child: SingleChildScrollView(
+                    physics: const ClampingScrollPhysics(),
+                    child: _buildQuickAddField(
+                      context,
+                      autofocus: true,
+                      onSubmitted: (value) async {
+                        final ok = await _tryQuickAdd(value);
+                        if (!mounted) return;
+                        if (ok) _closeAndroidQuickAdd();
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
       ],
+    );
+
+    if (!_useAndroidUi) return content;
+
+    return PopScope(
+      canPop: !_androidQuickAddOpen,
+      onPopInvoked: (didPop) {
+        if (didPop) return;
+        if (_androidQuickAddOpen) _closeAndroidQuickAdd();
+      },
+      child: content,
     );
   }
 
@@ -594,6 +738,10 @@ class _TaskPageState extends State<TaskPage> {
                 padding: const EdgeInsets.only(bottom: 12),
                 child: Draggable<Task>(
                   data: task,
+                  onDragStarted: () => _setTaskDragActive(true),
+                  onDragEnd: (_) => _setTaskDragActive(false),
+                  onDragCompleted: () => _setTaskDragActive(false),
+                  onDraggableCanceled: (_, __) => _setTaskDragActive(false),
                   feedback: Material(
                     color: Colors.transparent,
                     child: ConstrainedBox(
@@ -630,31 +778,56 @@ class _TaskPageState extends State<TaskPage> {
             ),
             const SizedBox(height: 12),
             _buildChecklistQuickAddField(context),
-          ] else if (!isTrashView) ...[
+          ] else if (!isTrashView && !_useAndroidUi) ...[
             _buildQuickAddField(context),
           ],
           if (showInlineFilters && !isTrashView && !isChecklistView) ...[
             const SizedBox(height: 12),
-            _TaskFilterChips(
-              selected: _filter,
-              counts: counts,
-              activeChecklistId: _activeChecklistId,
-              saving: _saving,
-              onSelect: _setFilter,
-              onDropTask: _applyDropToFilter,
-            ),
-            const SizedBox(height: 12),
-            _ChecklistChips(
-              checklists: _checklists,
-              activeChecklistId: _activeChecklistId,
-              loading: _loadingChecklists,
-              saving: _saving,
-              username: widget.username,
-              onSelect: _selectChecklist,
-              onCreate: _promptCreateChecklist,
-              onDelete: _confirmDeleteChecklist,
-              onDropTask: _applyDropToChecklist,
-            ),
+            if (_useAndroidUi) ...[
+              _ChecklistChips(
+                checklists: _checklists,
+                activeChecklistId: _activeChecklistId,
+                loading: _loadingChecklists,
+                saving: _saving,
+                username: widget.username,
+                singleRow: true,
+                onSelect: _selectChecklist,
+                onCreate: _promptCreateChecklist,
+                onDelete: _confirmDeleteChecklist,
+                onDropTask: _applyDropToChecklist,
+              ),
+              const SizedBox(height: 12),
+              _TaskFilterChips(
+                selected: _filter,
+                counts: counts,
+                activeChecklistId: _activeChecklistId,
+                saving: _saving,
+                singleRow: true,
+                onSelect: _setFilter,
+                onDropTask: _applyDropToFilter,
+              ),
+            ] else ...[
+              _TaskFilterChips(
+                selected: _filter,
+                counts: counts,
+                activeChecklistId: _activeChecklistId,
+                saving: _saving,
+                onSelect: _setFilter,
+                onDropTask: _applyDropToFilter,
+              ),
+              const SizedBox(height: 12),
+              _ChecklistChips(
+                checklists: _checklists,
+                activeChecklistId: _activeChecklistId,
+                loading: _loadingChecklists,
+                saving: _saving,
+                username: widget.username,
+                onSelect: _selectChecklist,
+                onCreate: _promptCreateChecklist,
+                onDelete: _confirmDeleteChecklist,
+                onDropTask: _applyDropToChecklist,
+              ),
+            ],
           ],
           if (isTrashView) ...[
             Row(
@@ -682,7 +855,7 @@ class _TaskPageState extends State<TaskPage> {
           ],
           const SizedBox(height: 12),
           Expanded(child: listBody),
-          if (!isTrashView && !isChecklistView) ...[
+          if (!isTrashView && !isChecklistView && !_useAndroidUi) ...[
             const SizedBox(height: 12),
             _TrashDropZone(
               count: trashCount,
@@ -742,7 +915,6 @@ class _TaskPageState extends State<TaskPage> {
       return _buildMatrixWorkspace(
         context,
         tasks: filtered,
-        header: header,
         showDetailPanel: showDetailPanel,
         selectedTask: selectedTask,
       );
@@ -763,7 +935,7 @@ class _TaskPageState extends State<TaskPage> {
               loading: _loadingTime,
               saving: _savingTime,
               lastSync: _lastTimeSync,
-              onRefresh: () => _loadTimeTracking(),
+              onRefresh: _loadTimeTracking,
               onAddActivity: () => _openActivityEditor(),
               onToggleActivity: _toggleActivity,
               onEditActivity: (activity) =>
@@ -794,6 +966,7 @@ class _TaskPageState extends State<TaskPage> {
     }
 
     if (isCalendar) {
+      final visibleTasks = _tasks.where((task) => task.deletedAt == null).toList();
       final initialMode = switch (
           widget.userSettings.calendarDefaultMode.trim().toLowerCase()) {
         'day' => CalendarMode.day,
@@ -802,10 +975,12 @@ class _TaskPageState extends State<TaskPage> {
         _ => CalendarMode.week,
       };
       return CalendarView(
-        tasks: _tasks,
+        tasks: _applySearch(visibleTasks),
         loading: _loading,
         saving: _saving,
         settings: widget.userSettings.calendarSettings,
+        timelineDefaultHour:
+            widget.userSettings.preferences.calendarTimelineDefaultHour,
         initialMode: initialMode,
         loadHolidayCnYear: _loadHolidayCnYear,
         onCreateTask: _createTaskFromCalendar,
@@ -886,7 +1061,6 @@ class _TaskPageState extends State<TaskPage> {
   Widget _buildMatrixWorkspace(
     BuildContext context, {
     required List<Task> tasks,
-    required Widget header,
     required bool showDetailPanel,
     required Task? selectedTask,
   }) {
@@ -1034,14 +1208,7 @@ class _TaskPageState extends State<TaskPage> {
       },
     );
 
-    final body = Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        header,
-        const SizedBox(height: 12),
-        Expanded(child: grid),
-      ],
-    );
+    final body = grid;
 
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1211,6 +1378,10 @@ class _TaskPageState extends State<TaskPage> {
                               padding: const EdgeInsets.only(bottom: 10),
                               child: Draggable<Task>(
                                 data: task,
+                                onDragStarted: () => _setTaskDragActive(true),
+                                onDragEnd: (_) => _setTaskDragActive(false),
+                                onDragCompleted: () => _setTaskDragActive(false),
+                                onDraggableCanceled: (_, __) => _setTaskDragActive(false),
                                 feedback: Material(
                                   color: Colors.transparent,
                                   child: ConstrainedBox(
@@ -1243,7 +1414,111 @@ class _TaskPageState extends State<TaskPage> {
     });
   }
 
-  Widget _buildQuickAddField(BuildContext context) {
+  void _setTaskDragActive(bool value) {
+    if (_isTaskDragActive == value) return;
+    setState(() => _isTaskDragActive = value);
+  }
+
+  void _openQuickAddSheet() {
+    if (_saving || _androidQuickAddOpen) return;
+    _quickAddController.clear();
+    _resetQuickAddForm();
+    setState(() {
+      _quickAddExpanded = false;
+      _androidQuickAddOpen = true;
+    });
+  }
+
+  void _closeAndroidQuickAdd() {
+    if (!_androidQuickAddOpen) return;
+    FocusScope.of(context).unfocus();
+    setState(() => _androidQuickAddOpen = false);
+  }
+
+  Widget _buildFloatingTrashTarget(BuildContext context) {
+    final trashCount = _tasks.where((task) => task.deletedAt != null).length;
+    return DragTarget<Task>(
+      onWillAcceptWithDetails: (_) => !_saving,
+      onAcceptWithDetails: (details) => _moveTaskToTrash(details.data),
+      builder: (context, candidate, rejected) {
+        final hovering = candidate.isNotEmpty;
+        final icon = hovering ? Icons.delete : Icons.delete_outline;
+        final borderColor = hovering ? AppColors.accent : AppColors.outline;
+        final bg = hovering
+            ? AppColors.accent.withOpacity(0.18)
+            : AppColors.surface.withOpacity(0.95);
+        final iconColor = hovering ? AppColors.accentDeep : AppColors.inkSoft;
+
+        return Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: _openTrash,
+            borderRadius: BorderRadius.circular(999),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 160),
+              curve: Curves.easeOut,
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: bg,
+                shape: BoxShape.circle,
+                border: Border.all(color: borderColor, width: 1.2),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.14),
+                    blurRadius: 18,
+                    offset: const Offset(0, 8),
+                  ),
+                ],
+              ),
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  AnimatedScale(
+                    duration: const Duration(milliseconds: 160),
+                    curve: Curves.easeOut,
+                    scale: hovering ? 1.18 : 1.0,
+                    child: Icon(icon, size: 26, color: iconColor),
+                  ),
+                  if (trashCount > 0)
+                    Positioned(
+                      right: -6,
+                      top: -6,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: AppColors.accentDeep,
+                          borderRadius: BorderRadius.circular(999),
+                          border: Border.all(color: AppColors.surface, width: 2),
+                        ),
+                        child: Text(
+                          trashCount > 99 ? '99+' : '$trashCount',
+                          style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w800,
+                              ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildQuickAddField(
+    BuildContext context, {
+    Future<void> Function(String value)? onSubmitted,
+    bool autofocus = false,
+  }) {
+    Future<void> submit() async {
+      final handler = onSubmitted ?? _handleQuickAdd;
+      await handler(_quickAddController.text);
+    }
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
       decoration: BoxDecoration(
@@ -1261,6 +1536,7 @@ class _TaskPageState extends State<TaskPage> {
               Expanded(
                 child: TextField(
                   controller: _quickAddController,
+                  autofocus: autofocus,
                   enabled: !_saving,
                   decoration: InputDecoration(
                     hintText: _saving ? '正在保存...' : '输入任务名称，回车添加',
@@ -1270,9 +1546,15 @@ class _TaskPageState extends State<TaskPage> {
                     contentPadding: EdgeInsets.zero,
                   ),
                   textInputAction: TextInputAction.done,
-                  onSubmitted: _handleQuickAdd,
+                  onSubmitted: onSubmitted ?? _handleQuickAdd,
                 ),
               ),
+              if (_useAndroidUi)
+                IconButton(
+                  onPressed: _saving ? null : submit,
+                  icon: const Icon(Icons.check),
+                  tooltip: '添加',
+                ),
               IconButton(
                 onPressed: _toggleQuickAddExpanded,
                 icon: Icon(
@@ -1284,86 +1566,149 @@ class _TaskPageState extends State<TaskPage> {
           ),
           if (_quickAddExpanded) ...[
             const SizedBox(height: 12),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: SingleChildScrollView(
-                key: const ValueKey('task_detail_scroll'),
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: [
-                    _buildQuickAddPicker(
-                      context,
-                      label: '开始日期',
-                      value: _formatQuickAddDate(_quickAddDate),
-                      width: 140,
-                      onTap: _pickQuickAddDate,
-                    ),
-                    const SizedBox(width: 8),
-                    _buildQuickAddPicker(
-                      context,
-                      label: '开始时间',
-                      value: _formatQuickAddTime(context, _quickAddStartTime),
-                      width: 120,
-                      onTap: _pickQuickAddStartTime,
-                    ),
-                    const SizedBox(width: 8),
-                    _buildQuickAddPicker(
-                      context,
-                      label: '截止时间',
-                      value: _formatQuickAddTime(context, _quickAddEndTime),
-                      width: 120,
-                      onTap: _pickQuickAddEndTime,
-                    ),
-                    const SizedBox(width: 12),
-                    Container(
-                      width: 1,
-                      height: 18,
-                      color: AppColors.outline,
-                    ),
-                    const SizedBox(width: 12),
-                    _buildQuickAddAction(
-                      icon: Icons.repeat,
-                      label: _repeatSummary(),
-                      active: _quickAddRepeat,
-                      onTap: _openRepeatConfig,
-                    ),
-                    _buildQuickAddAction(
-                      icon: Icons.notifications_none,
-                      label: _remindSummary(),
-                      active: _quickAddRemindAt != null,
-                      onTap: _handleQuickAddRemindTap,
-                    ),
-                    _buildQuickAddAction(
-                      icon: Icons.attach_file,
-                      label: _attachmentSummary(),
-                      active: _quickAddAttachments.isNotEmpty,
-                      onTap: _pickQuickAddAttachments,
-                    ),
-                    _buildQuickAddAction(
-                      icon: Icons.color_lens_outlined,
-                      label: _quickAddColorHex.isEmpty
-                          ? '颜色 $_quickAddDefaultColorLabel'
-                          : '颜色 #${_quickAddColorHex.toUpperCase()}',
-                      active: _quickAddColorHex.isNotEmpty,
-                      onTap: _pickQuickAddColor,
-                    ),
-                    _buildQuickAddAction(
-                      icon: Icons.grid_view_rounded,
-                      label: _matrixSummary(),
-                      active: _quickAddMatrixPriority != 0,
-                      onTap: _pickQuickAddMatrixPriority,
-                    ),
-                    _buildQuickAddAction(
-                      icon: Icons.playlist_add,
-                      label: _subtaskSummary(),
-                      active: _quickAddSubtasksExpanded ||
-                          _quickAddSubtasks.isNotEmpty,
-                      onTap: _toggleQuickAddSubtasks,
-                    ),
-                  ],
+            if (_useAndroidUi)
+              Column(
+                children: [
+                  _buildQuickAddPicker(
+                    context,
+                    label: '开始',
+                    value: _formatQuickAddStartDateTime(context),
+                    width: double.infinity,
+                    onTap: _pickQuickAddStartDateTime,
+                  ),
+                  const SizedBox(height: 8),
+                  _buildQuickAddPicker(
+                    context,
+                    label: '截止',
+                    value: _formatQuickAddEndDateTime(context),
+                    width: double.infinity,
+                    onTap: _pickQuickAddEndDateTime,
+                  ),
+                  const SizedBox(height: 12),
+                  _buildQuickAddPicker(
+                    context,
+                    label: '重复',
+                    value: _repeatSummary(),
+                    width: double.infinity,
+                    onTap: _openRepeatConfig,
+                  ),
+                  const SizedBox(height: 8),
+                  _buildQuickAddPicker(
+                    context,
+                    label: '提醒',
+                    value: _remindSummary(),
+                    width: double.infinity,
+                    onTap: _handleQuickAddRemindTap,
+                  ),
+                  const SizedBox(height: 8),
+                  _buildQuickAddPicker(
+                    context,
+                    label: '附件',
+                    value: _attachmentSummary(),
+                    width: double.infinity,
+                    onTap: _pickQuickAddAttachments,
+                  ),
+                  const SizedBox(height: 8),
+                  _buildQuickAddPicker(
+                    context,
+                    label: '颜色',
+                    value: _quickAddColorHex.isEmpty
+                        ? _quickAddDefaultColorLabel
+                        : '#${_quickAddColorHex.toUpperCase()}',
+                    width: double.infinity,
+                    onTap: _pickQuickAddColor,
+                  ),
+                  const SizedBox(height: 8),
+                  _buildQuickAddPicker(
+                    context,
+                    label: '四象限',
+                    value: _matrixSummary(),
+                    width: double.infinity,
+                    onTap: _pickQuickAddMatrixPriority,
+                  ),
+                  const SizedBox(height: 8),
+                  _buildQuickAddPicker(
+                    context,
+                    label: '子任务',
+                    value: _subtaskSummary(),
+                    width: double.infinity,
+                    onTap: _toggleQuickAddSubtasks,
+                  ),
+                ],
+              )
+            else
+              Align(
+                alignment: Alignment.centerLeft,
+                child: SingleChildScrollView(
+                  key: const ValueKey('task_detail_scroll'),
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      _buildQuickAddPicker(
+                        context,
+                        label: '开始',
+                        value: _formatQuickAddStartDateTime(context),
+                        width: 200,
+                        onTap: _pickQuickAddStartDateTime,
+                      ),
+                      const SizedBox(width: 8),
+                      _buildQuickAddPicker(
+                        context,
+                        label: '截止',
+                        value: _formatQuickAddEndDateTime(context),
+                        width: 200,
+                        onTap: _pickQuickAddEndDateTime,
+                      ),
+                      const SizedBox(width: 12),
+                      Container(
+                        width: 1,
+                        height: 18,
+                        color: AppColors.outline,
+                      ),
+                      const SizedBox(width: 12),
+                      _buildQuickAddAction(
+                        icon: Icons.repeat,
+                        label: _repeatSummary(),
+                        active: _quickAddRepeat,
+                        onTap: _openRepeatConfig,
+                      ),
+                      _buildQuickAddAction(
+                        icon: Icons.notifications_none,
+                        label: _remindSummary(),
+                        active: _quickAddRemindAt != null,
+                        onTap: _handleQuickAddRemindTap,
+                      ),
+                      _buildQuickAddAction(
+                        icon: Icons.attach_file,
+                        label: _attachmentSummary(),
+                        active: _quickAddAttachments.isNotEmpty,
+                        onTap: _pickQuickAddAttachments,
+                      ),
+                      _buildQuickAddAction(
+                        icon: Icons.color_lens_outlined,
+                        label: _quickAddColorHex.isEmpty
+                            ? '颜色 $_quickAddDefaultColorLabel'
+                            : '颜色 #${_quickAddColorHex.toUpperCase()}',
+                        active: _quickAddColorHex.isNotEmpty,
+                        onTap: _pickQuickAddColor,
+                      ),
+                      _buildQuickAddAction(
+                        icon: Icons.grid_view_rounded,
+                        label: _matrixSummary(),
+                        active: _quickAddMatrixPriority != 0,
+                        onTap: _pickQuickAddMatrixPriority,
+                      ),
+                      _buildQuickAddAction(
+                        icon: Icons.playlist_add,
+                        label: _subtaskSummary(),
+                        active: _quickAddSubtasksExpanded ||
+                            _quickAddSubtasks.isNotEmpty,
+                        onTap: _toggleQuickAddSubtasks,
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ),
             if (_quickAddSubtasksExpanded) ...[
               const SizedBox(height: 10),
               _buildQuickAddSubtasks(context),
@@ -1483,15 +1828,20 @@ class _TaskPageState extends State<TaskPage> {
     return tags;
   }
 
-  Future<void> _handleQuickAdd(String value) async {
+  Future<bool> _tryQuickAdd(String value) async {
     final parsed = _parseQuickAddInput(value);
     final title = parsed.title.trim();
-    if (title.isEmpty || _saving) return;
+    if (title.isEmpty || _saving) return false;
+
     _quickAddController.clear();
     FocusScope.of(context).unfocus();
     final subtasks = _buildSubtasksFromDrafts();
     final startTime = _timeToString(_quickAddStartTime);
-    final endTime = _timeToString(_quickAddEndTime);
+    final endTime = _encodeEndTime(
+      startTime: _quickAddStartTime,
+      endTime: _quickAddEndTime,
+      explicitOffsetDays: _quickAddEndDayOffset,
+    );
     final repeatRule = _quickAddRepeat ? _buildRepeatRule() : '';
 
     final tasksToCreate = <_QuickAddTaskDraft>[];
@@ -1534,54 +1884,92 @@ class _TaskPageState extends State<TaskPage> {
     }
 
     final created = await _addTasks(tasksToCreate);
-    if (created.isNotEmpty && _quickAddAttachments.isNotEmpty) {
+    if (created.isEmpty) return false;
+    if (_quickAddAttachments.isNotEmpty) {
       await _uploadQuickAddAttachments(created.first);
     }
     _resetQuickAddForm();
+    return true;
+  }
+
+  Future<void> _handleQuickAdd(String value) async {
+    await _tryQuickAdd(value);
   }
 
   void _toggleQuickAddExpanded() {
     setState(() => _quickAddExpanded = !_quickAddExpanded);
   }
 
-  Future<void> _pickQuickAddDate() async {
+  Future<void> _pickQuickAddStartDateTime() async {
     final now = DateTime.now();
-    final picked = await showDatePicker(
+    final pickedDate = await showDatePicker(
       context: context,
       initialDate: _quickAddDate ?? now,
       firstDate: DateTime(2000),
       lastDate: DateTime(2100),
     );
-    if (picked == null) return;
-    setState(() => _quickAddDate = picked);
-  }
-
-  Future<void> _pickQuickAddStartTime() async {
-    final picked = await showTimePicker(
+    if (pickedDate == null) return;
+    final pickedTime = await showTimePicker(
       context: context,
       initialTime: _quickAddStartTime ?? TimeOfDay.now(),
     );
-    if (picked == null) return;
-    setState(() => _quickAddStartTime = picked);
+    if (!mounted) return;
+    setState(() {
+      _quickAddDate = pickedDate;
+      if (pickedTime != null) _quickAddStartTime = pickedTime;
+    });
   }
 
-  Future<void> _pickQuickAddEndTime() async {
-    final picked = await showTimePicker(
+  Future<void> _pickQuickAddEndDateTime() async {
+    final now = DateTime.now();
+    final base =
+        _quickAddDate ?? DateTime(now.year, now.month, now.day);
+    final baseDay = DateTime(base.year, base.month, base.day);
+    final initialDate =
+        baseDay.add(Duration(days: _quickAddEndDayOffset.clamp(0, 1)));
+    final pickedDate = await showDatePicker(
+      context: context,
+      initialDate: initialDate,
+      firstDate: baseDay,
+      lastDate: baseDay.add(const Duration(days: 1)),
+    );
+    if (pickedDate == null) return;
+    final pickedTime = await showTimePicker(
       context: context,
       initialTime: _quickAddEndTime ?? TimeOfDay.now(),
     );
-    if (picked == null) return;
-    setState(() => _quickAddEndTime = picked);
+    if (!mounted) return;
+    setState(() {
+      final pickedDay =
+          DateTime(pickedDate.year, pickedDate.month, pickedDate.day);
+      _quickAddEndDayOffset =
+          pickedDay.difference(baseDay).inDays.clamp(0, 1);
+      if (pickedTime != null) _quickAddEndTime = pickedTime;
+    });
   }
 
-  String _formatQuickAddDate(DateTime? date) {
-    if (date == null) return '未设置';
-    return DateFormat('M月d日').format(date);
+  String _formatQuickAddStartDateTime(BuildContext context) {
+    final date = _quickAddDate;
+    final time = _quickAddStartTime;
+    if (date == null && time == null) return '未设置';
+    final dateLabel = date == null ? '' : DateFormat('M月d日').format(date);
+    final timeLabel = time == null ? '' : time.format(context);
+    final parts = [dateLabel, timeLabel].where((value) => value.isNotEmpty);
+    return parts.isEmpty ? '未设置' : parts.join(' ');
   }
 
-  String _formatQuickAddTime(BuildContext context, TimeOfDay? time) {
+  String _formatQuickAddEndDateTime(BuildContext context) {
+    final time = _quickAddEndTime;
     if (time == null) return '未设置';
-    return time.format(context);
+    final offsetDays = _quickAddEndDayOffset.clamp(0, 1);
+    final baseDate = _quickAddDate;
+    final dateLabel = baseDate == null
+        ? (offsetDays > 0 ? '次日' : '')
+        : DateFormat('M月d日')
+            .format(baseDate.add(Duration(days: offsetDays)));
+    final timeLabel = time.format(context);
+    final parts = [dateLabel, timeLabel].where((value) => value.isNotEmpty);
+    return parts.isEmpty ? '未设置' : parts.join(' ');
   }
 
   String _timeToString(TimeOfDay? time) {
@@ -1589,6 +1977,32 @@ class _TaskPageState extends State<TaskPage> {
     final hour = time.hour.toString().padLeft(2, '0');
     final minute = time.minute.toString().padLeft(2, '0');
     return '$hour:$minute';
+  }
+
+  String _encodeEndTime({
+    required TimeOfDay? startTime,
+    required TimeOfDay? endTime,
+    required int explicitOffsetDays,
+  }) {
+    final end = endTime;
+    if (end == null) return '';
+    var offsetDays = explicitOffsetDays.clamp(0, 1);
+
+    final start = startTime;
+    if (start != null) {
+      final startMinutes = start.hour * 60 + start.minute;
+      final endMinutes = end.hour * 60 + end.minute;
+      if (offsetDays == 0 && endMinutes == 0 && startMinutes > 0) {
+        return '24:00';
+      }
+      if (offsetDays == 0 && endMinutes <= startMinutes) {
+        offsetDays = 1;
+      }
+    }
+
+    final timeValue = _timeToString(end);
+    if (offsetDays == 0) return timeValue;
+    return '$timeValue+$offsetDays';
   }
 
   String _repeatSummary() {
@@ -1640,6 +2054,7 @@ class _TaskPageState extends State<TaskPage> {
       1 => 'Q4',
       _ => '未设置',
     };
+    if (label == '未设置') return label;
     return '四象限 $label';
   }
 
@@ -2244,6 +2659,7 @@ class _TaskPageState extends State<TaskPage> {
       _quickAddDate = null;
       _quickAddStartTime = null;
       _quickAddEndTime = null;
+      _quickAddEndDayOffset = 0;
       _quickAddRepeat = false;
       _quickAddRepeatFrequency = RepeatFrequency.daily;
       _quickAddRepeatCount = 1;
@@ -2500,12 +2916,14 @@ class _TaskPageState extends State<TaskPage> {
       ),
     );
     controller.dispose();
+    if (!mounted) return;
     final trimmed = name?.trim() ?? '';
     if (trimmed.isEmpty) return;
 
     setState(() => _saving = true);
     try {
       final created = await widget.apiClient.createChecklist(name: trimmed);
+      if (!mounted) return;
       setState(() {
         _checklists = [..._checklists, created];
         _activeChecklistId = created.id;
@@ -2515,11 +2933,8 @@ class _TaskPageState extends State<TaskPage> {
       await _loadChecklistItems(created.id);
     } on UnauthorizedException {
       widget.onLogout();
-    } catch (_) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('创建清单失败。')),
-      );
+    } catch (e) {
+      _showFailureSnackBar('创建清单失败', e);
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -2544,12 +2959,13 @@ class _TaskPageState extends State<TaskPage> {
         ],
       ),
     );
+    if (!mounted) return;
     if (confirmed != true) return;
 
     setState(() => _saving = true);
     try {
       await widget.apiClient.deleteChecklist(list.id);
-      if (!context.mounted) return;
+      if (!mounted) return;
       setState(() {
         _checklists = _checklists.where((item) => item.id != list.id).toList();
         _checklistItems.remove(list.id);
@@ -2561,7 +2977,7 @@ class _TaskPageState extends State<TaskPage> {
     } on UnauthorizedException {
       widget.onLogout();
     } catch (_) {
-      if (!context.mounted) return;
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('删除清单失败。')),
       );
@@ -2581,18 +2997,15 @@ class _TaskPageState extends State<TaskPage> {
     try {
       final created = await widget.apiClient
           .createChecklistItem(listId: listId, title: title);
-      if (!context.mounted) return;
+      if (!mounted) return;
       setState(() {
         final existing = _checklistItems[listId] ?? <ChecklistItem>[];
         _checklistItems[listId] = [...existing, created];
       });
     } on UnauthorizedException {
       widget.onLogout();
-    } catch (_) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('创建清单事项失败。')),
-      );
+    } catch (e) {
+      _showFailureSnackBar('创建清单事项失败', e);
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -2607,7 +3020,7 @@ class _TaskPageState extends State<TaskPage> {
         itemId: item.id,
         completed: !item.completed,
       );
-      if (!context.mounted) return;
+      if (!mounted) return;
       setState(() {
         final items = _checklistItems[item.listId] ?? <ChecklistItem>[];
         _checklistItems[item.listId] =
@@ -2616,7 +3029,7 @@ class _TaskPageState extends State<TaskPage> {
     } on UnauthorizedException {
       widget.onLogout();
     } catch (_) {
-      if (!context.mounted) return;
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('更新清单事项失败。')),
       );
@@ -2644,13 +3057,14 @@ class _TaskPageState extends State<TaskPage> {
         ],
       ),
     );
+    if (!mounted) return;
     if (confirmed != true) return;
 
     setState(() => _saving = true);
     try {
       await widget.apiClient
           .deleteChecklistItem(listId: item.listId, itemId: item.id);
-      if (!context.mounted) return;
+      if (!mounted) return;
       setState(() {
         final items = _checklistItems[item.listId] ?? <ChecklistItem>[];
         _checklistItems[item.listId] =
@@ -2662,7 +3076,7 @@ class _TaskPageState extends State<TaskPage> {
     } on UnauthorizedException {
       widget.onLogout();
     } catch (_) {
-      if (!context.mounted) return;
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('删除事项失败。')),
       );
@@ -2795,6 +3209,9 @@ class _TaskPageState extends State<TaskPage> {
   }
 
   void _handleWorkspaceChanged(WorkspaceView view) {
+    _isTaskDragActive = false;
+    _androidQuickAddOpen = false;
+    _quickAddExpanded = false;
     if (view != WorkspaceView.tasks) {
       setState(() {
         _showTrash = false;
@@ -3187,11 +3604,8 @@ class _TaskPageState extends State<TaskPage> {
       });
     } on UnauthorizedException {
       widget.onLogout();
-    } catch (_) {
-      if (!mounted) return created;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('创建任务失败。')),
-      );
+    } catch (e) {
+      _showFailureSnackBar('创建任务失败', e);
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -3210,7 +3624,6 @@ class _TaskPageState extends State<TaskPage> {
 
     final now = DateTime.now();
     final today = _dateFormatter.format(now);
-    final tomorrow = _dateFormatter.format(now.add(const Duration(days: 1)));
 
     String dueDate = date != null ? _dateFormatter.format(date) : '';
     bool inbox = false;
@@ -3221,16 +3634,11 @@ class _TaskPageState extends State<TaskPage> {
         case TaskFilter.today:
           dueDate = today;
           break;
-        case TaskFilter.tomorrow:
-          dueDate = tomorrow;
-          break;
         case TaskFilter.next7:
           dueDate = today;
           break;
         case TaskFilter.done:
           status = 'completed';
-          break;
-        case TaskFilter.all:
           break;
         case TaskFilter.inbox:
           inbox = true;
@@ -3310,24 +3718,13 @@ class _TaskPageState extends State<TaskPage> {
 
     final now = DateTime.now();
     final todayStr = _dateFormatter.format(now);
-    final tomorrowStr = _dateFormatter.format(now.add(const Duration(days: 1)));
     final next7Str = _dateFormatter.format(now.add(const Duration(days: 7)));
 
     switch (target) {
-      case TaskFilter.all:
-        return;
       case TaskFilter.today:
         await _updateTaskFromDetail(
           task,
           dueDate: todayStr,
-          inbox: false,
-          status: 'todo',
-        );
-        break;
-      case TaskFilter.tomorrow:
-        await _updateTaskFromDetail(
-          task,
-          dueDate: tomorrowStr,
           inbox: false,
           status: 'todo',
         );
@@ -3488,11 +3885,8 @@ class _TaskPageState extends State<TaskPage> {
       });
     } on UnauthorizedException {
       widget.onLogout();
-    } catch (_) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('加载任务失败。')),
-      );
+    } catch (e) {
+      _showFailureSnackBar('加载任务失败', e);
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -3520,12 +3914,8 @@ class _TaskPageState extends State<TaskPage> {
       String end = '';
       if (startTime != null) {
         final startMinutes = startTime.hour * 60 + startTime.minute;
-        final endMinutes = startMinutes + 15;
-        if (endMinutes <= 24 * 60) {
-          final hour = (endMinutes ~/ 60).toString().padLeft(2, '0');
-          final minute = (endMinutes % 60).toString().padLeft(2, '0');
-          end = '$hour:$minute';
-        }
+        final endTotalMinutes = startMinutes + 15;
+        end = _encodeEndTimeFromTotalMinutes(endTotalMinutes);
       }
       final created = await widget.apiClient.createTask(
         title: title,
@@ -3544,11 +3934,8 @@ class _TaskPageState extends State<TaskPage> {
       return created;
     } on UnauthorizedException {
       widget.onLogout();
-    } catch (_) {
-      if (!context.mounted) return null;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('创建任务失败。')),
-      );
+    } catch (e) {
+      _showFailureSnackBar('创建任务失败', e);
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -3569,21 +3956,22 @@ class _TaskPageState extends State<TaskPage> {
       var end = '';
       if (startTime != null) {
         final startMinutes = startTime.hour * 60 + startTime.minute;
-        int endMinutes;
+        int endTotalMinutes;
         if (endTime != null) {
-          endMinutes = endTime.hour * 60 + endTime.minute;
-          if (endMinutes == 0 && startMinutes > 0) endMinutes = 24 * 60;
+          final pickedMinutes = endTime.hour * 60 + endTime.minute;
+          if (pickedMinutes == 0 && startMinutes > 0) {
+            endTotalMinutes = 24 * 60;
+          } else if (pickedMinutes <= startMinutes) {
+            endTotalMinutes = 24 * 60 + pickedMinutes;
+          } else {
+            endTotalMinutes = pickedMinutes;
+          }
         } else {
-          final oldStart = _parseTimeMinutes(task.startTime);
-          final oldEnd = _parseTimeMinutes(task.endTime);
-          final duration =
-              (oldStart != null && oldEnd != null && oldEnd > oldStart)
-                  ? (oldEnd - oldStart)
-                  : 15;
-          endMinutes = startMinutes + duration;
+          final duration = _taskDurationMinutes(task) ?? 15;
+          endTotalMinutes = startMinutes + duration;
         }
-        endMinutes = endMinutes.clamp(startMinutes + 15, 24 * 60);
-        end = _minutesToTimeString(endMinutes);
+        endTotalMinutes = endTotalMinutes.clamp(startMinutes + 15, 48 * 60);
+        end = _encodeEndTimeFromTotalMinutes(endTotalMinutes);
       }
 
       final updated = await widget.apiClient.updateTask(
@@ -3621,7 +4009,8 @@ class _TaskPageState extends State<TaskPage> {
   int? _parseTimeMinutes(String value) {
     final trimmed = value.trim();
     if (trimmed.isEmpty) return null;
-    final parts = trimmed.split(':');
+    final timePart = trimmed.split('+').first.trim();
+    final parts = timePart.split(':');
     if (parts.length != 2) return null;
     final hour = int.tryParse(parts[0]);
     final minute = int.tryParse(parts[1]);
@@ -3630,6 +4019,57 @@ class _TaskPageState extends State<TaskPage> {
     if (minute < 0 || minute > 59) return null;
     if (hour == 24 && minute != 0) return null;
     return hour * 60 + minute;
+  }
+
+  int _parseEndOffsetDays(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return 0;
+    final plusIndex = trimmed.lastIndexOf('+');
+    if (plusIndex <= 0) return 0;
+    final parsed = int.tryParse(trimmed.substring(plusIndex + 1).trim()) ?? 0;
+    return parsed < 0 ? 0 : parsed;
+  }
+
+  int? _taskDurationMinutes(Task task) {
+    final startMinutes = _parseTimeMinutes(task.startTime);
+    if (startMinutes == null) return null;
+    final endRaw = task.endTime.trim();
+    if (endRaw.isEmpty) return null;
+
+    final explicitOffset = _parseEndOffsetDays(endRaw);
+    final plusIndex = endRaw.lastIndexOf('+');
+    final hasExplicitOffset = plusIndex > 0;
+    final timePart =
+        (hasExplicitOffset ? endRaw.substring(0, plusIndex) : endRaw).trim();
+    final endMinutes = _parseTimeMinutes(timePart);
+    if (endMinutes == null) return null;
+
+    int endTotalMinutes;
+    if (timePart == '24:00') {
+      endTotalMinutes = 24 * 60;
+    } else if (explicitOffset > 0) {
+      endTotalMinutes = explicitOffset * 24 * 60 + endMinutes;
+    } else if (endMinutes <= startMinutes) {
+      endTotalMinutes = 24 * 60 + endMinutes;
+    } else {
+      endTotalMinutes = endMinutes;
+    }
+
+    final duration = endTotalMinutes - startMinutes;
+    if (duration <= 0) return null;
+    return duration;
+  }
+
+  String _encodeEndTimeFromTotalMinutes(int endTotalMinutes) {
+    const dayMinutes = 24 * 60;
+    if (endTotalMinutes <= dayMinutes) {
+      return _minutesToTimeString(endTotalMinutes);
+    }
+    final offsetDays = (endTotalMinutes ~/ dayMinutes).clamp(0, 1);
+    final minuteOfDay = endTotalMinutes % dayMinutes;
+    if (offsetDays == 1 && minuteOfDay == 0) return '24:00';
+    final timeValue = _minutesToTimeString(minuteOfDay);
+    return '$timeValue+$offsetDays';
   }
 
   void _openTaskDetailFromCalendar(Task task) {
@@ -3790,8 +4230,6 @@ class _TaskPageState extends State<TaskPage> {
   List<Task> _applyFilter(List<Task> tasks, TaskFilter filter) {
     final today = DateTime.now();
     final todayStr = _dateFormatter.format(today);
-    final tomorrowStr =
-        _dateFormatter.format(today.add(const Duration(days: 1)));
     final weekEnd = today.add(const Duration(days: 7));
 
     bool isWithinWeek(Task task) {
@@ -3816,11 +4254,6 @@ class _TaskPageState extends State<TaskPage> {
             .where((task) => task.dueDate == todayStr && !task.isCompleted)
             .toList();
         break;
-      case TaskFilter.tomorrow:
-        result = visible
-            .where((task) => task.dueDate == tomorrowStr && !task.isCompleted)
-            .toList();
-        break;
       case TaskFilter.next7:
         result = visible
             .where((task) => !task.isCompleted && isWithinWeek(task))
@@ -3828,9 +4261,6 @@ class _TaskPageState extends State<TaskPage> {
         break;
       case TaskFilter.done:
         result = visible.where((task) => task.isCompleted).toList();
-        break;
-      case TaskFilter.all:
-        result = visible;
         break;
     }
     result.sort(_sortTask);
@@ -4114,7 +4544,7 @@ class _TaskFilterTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return DragTarget<Task>(
-      onWillAcceptWithDetails: (_) => canDrop && filter != TaskFilter.all,
+      onWillAcceptWithDetails: (_) => canDrop,
       onAcceptWithDetails: (details) => onDrop(details.data),
       builder: (context, candidate, rejected) {
         final hovering = candidate.isNotEmpty;
@@ -4269,6 +4699,7 @@ class _TaskFilterChips extends StatelessWidget {
     required this.counts,
     required this.activeChecklistId,
     required this.saving,
+    this.singleRow = false,
     required this.onSelect,
     required this.onDropTask,
   });
@@ -4277,31 +4708,48 @@ class _TaskFilterChips extends StatelessWidget {
   final Map<TaskFilter, int> counts;
   final int? activeChecklistId;
   final bool saving;
+  final bool singleRow;
   final ValueChanged<TaskFilter> onSelect;
   final void Function(Task task, TaskFilter target) onDropTask;
 
   @override
   Widget build(BuildContext context) {
+    final chips = TaskFilter.values.map((filter) {
+      final count = counts[filter] ?? 0;
+      final label = count > 0 ? '${filter.label} · $count' : filter.label;
+      return DragTarget<Task>(
+        onWillAcceptWithDetails: (_) => !saving,
+        onAcceptWithDetails: (details) => onDropTask(details.data, filter),
+        builder: (context, candidate, rejected) {
+          final hovering = candidate.isNotEmpty;
+          final active = activeChecklistId == null && selected == filter;
+          return ChoiceChip(
+            label: Text(label),
+            selected: active || hovering,
+            onSelected: (_) => onSelect(filter),
+          );
+        },
+      );
+    }).toList();
+
+    if (singleRow) {
+      return SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            for (var i = 0; i < chips.length; i++) ...[
+              if (i > 0) const SizedBox(width: 8),
+              chips[i],
+            ],
+          ],
+        ),
+      );
+    }
+
     return Wrap(
       spacing: 8,
       runSpacing: 8,
-      children: TaskFilter.values.map((filter) {
-        final count = counts[filter] ?? 0;
-        final label = count > 0 ? '${filter.label} · $count' : filter.label;
-        return DragTarget<Task>(
-          onWillAcceptWithDetails: (_) => !saving && filter != TaskFilter.all,
-          onAcceptWithDetails: (details) => onDropTask(details.data, filter),
-          builder: (context, candidate, rejected) {
-            final hovering = candidate.isNotEmpty;
-            final active = activeChecklistId == null && selected == filter;
-            return ChoiceChip(
-              label: Text(label),
-              selected: active || hovering,
-              onSelected: (_) => onSelect(filter),
-            );
-          },
-        );
-      }).toList(),
+      children: chips,
     );
   }
 }
@@ -4313,6 +4761,7 @@ class _ChecklistChips extends StatelessWidget {
     required this.loading,
     required this.saving,
     required this.username,
+    this.singleRow = false,
     required this.onSelect,
     required this.onCreate,
     required this.onDelete,
@@ -4324,6 +4773,7 @@ class _ChecklistChips extends StatelessWidget {
   final bool loading;
   final bool saving;
   final String username;
+  final bool singleRow;
   final ValueChanged<int> onSelect;
   final VoidCallback onCreate;
   final ValueChanged<ChecklistList> onDelete;
@@ -4367,29 +4817,49 @@ class _ChecklistChips extends StatelessWidget {
                 ?.copyWith(color: AppColors.inkSoft),
           )
         else
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: checklists
-                .map(
-                  (list) => DragTarget<Task>(
-                    onWillAcceptWithDetails: (_) => !saving,
-                    onAcceptWithDetails: (details) =>
-                        onDropTask(details.data, list),
-                    builder: (context, candidate, rejected) {
-                      final hovering = candidate.isNotEmpty;
-                      return InputChip(
-                        label: Text(list.name.isEmpty ? '未命名清单' : list.name),
-                        selected: activeChecklistId == list.id || hovering,
-                        onPressed: saving ? null : () => onSelect(list.id),
-                        onDeleted: saving || list.owner != username
-                            ? null
-                            : () => onDelete(list),
-                      );
-                    },
+          Builder(
+            builder: (context) {
+              final chips = checklists
+                  .map(
+                    (list) => DragTarget<Task>(
+                      onWillAcceptWithDetails: (_) => !saving,
+                      onAcceptWithDetails: (details) =>
+                          onDropTask(details.data, list),
+                      builder: (context, candidate, rejected) {
+                        final hovering = candidate.isNotEmpty;
+                        return InputChip(
+                          label: Text(list.name.isEmpty ? '未命名清单' : list.name),
+                          selected: activeChecklistId == list.id || hovering,
+                          onPressed: saving ? null : () => onSelect(list.id),
+                          onDeleted: saving || list.owner != username
+                              ? null
+                              : () => onDelete(list),
+                        );
+                      },
+                    ),
+                  )
+                  .toList();
+
+              if (singleRow) {
+                return SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      for (var i = 0; i < chips.length; i++) ...[
+                        if (i > 0) const SizedBox(width: 8),
+                        chips[i],
+                      ],
+                    ],
                   ),
-                )
-                .toList(),
+                );
+              }
+
+              return Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: chips,
+              );
+            },
           ),
       ],
     );
@@ -4681,6 +5151,21 @@ class _TaskDetailPanel extends StatelessWidget {
   final TaskUpdateCallback onUpdateTask;
   final Future<bool> Function(Task task)? onDeleteTask;
 
+  int? _parseTimeMinutes(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return null;
+    final timePart = trimmed.split('+').first.trim();
+    final parts = timePart.split(':');
+    if (parts.length != 2) return null;
+    final hour = int.tryParse(parts[0]);
+    final minute = int.tryParse(parts[1]);
+    if (hour == null || minute == null) return null;
+    if (hour < 0 || hour > 24) return null;
+    if (minute < 0 || minute > 59) return null;
+    if (hour == 24 && minute != 0) return null;
+    return hour * 60 + minute;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -4751,7 +5236,11 @@ class _TaskDetailPanel extends StatelessWidget {
     }
 
     TimeOfDay? parseTime(String raw) {
-      final parts = raw.trim().split(':');
+      final trimmed = raw.trim();
+      if (trimmed.isEmpty) return null;
+      final timePart = trimmed.split('+').first.trim();
+      if (timePart == '24:00') return const TimeOfDay(hour: 0, minute: 0);
+      final parts = timePart.split(':');
       if (parts.length != 2) return null;
       final hour = int.tryParse(parts[0]);
       final minute = int.tryParse(parts[1]);
@@ -4771,12 +5260,6 @@ class _TaskDetailPanel extends StatelessWidget {
       final parsed = parseDate(raw);
       if (parsed == null) return raw;
       return DateFormat('M月d日').format(parsed);
-    }
-
-    String formatTimeValue(String raw) {
-      final trimmed = raw.trim();
-      if (trimmed.isEmpty) return '未设置';
-      return trimmed;
     }
 
     String formatRemindValue(int? millis) {
@@ -4938,58 +5421,111 @@ class _TaskDetailPanel extends StatelessWidget {
       onClose();
     }
 
-    Future<void> pickDueDate() async {
+    Future<void> pickStartDateTime() async {
       final now = DateTime.now();
       final initial = parseDate(task.dueDate) ?? now;
-      final picked = await showDatePicker(
+      final pickedDate = await showDatePicker(
         context: context,
         initialDate: initial,
         firstDate: DateTime(2000),
         lastDate: DateTime(2100),
       );
-      if (picked == null) return;
+      if (pickedDate == null) return;
+      final pickedTime = await showTimePicker(
+        context: context,
+        initialTime: parseTime(task.startTime) ?? TimeOfDay.now(),
+      );
+      if (!context.mounted) return;
       await onUpdateTask(
         task,
-        dueDate: DateFormat('yyyy-MM-dd').format(picked),
+        dueDate: DateFormat('yyyy-MM-dd').format(pickedDate),
+        startTime: pickedTime == null ? '' : formatTime(pickedTime),
         inbox: false,
       );
     }
 
-    Future<void> clearDueDate() async {
+    Future<void> clearStartDateTime() async {
       await onUpdateTask(
         task,
         dueDate: '',
+        startTime: '',
+        endTime: '',
         inbox: task.isCompleted
             ? false
             : (task.checklistId != null ? false : true),
       );
     }
 
-    Future<void> pickStartTime() async {
-      final initial = parseTime(task.startTime) ?? TimeOfDay.now();
-      final picked = await showTimePicker(
+    int _currentEndOffsetDays() {
+      final raw = task.endTime.trim();
+      if (raw.isEmpty) return 0;
+      final plusIndex = raw.lastIndexOf('+');
+      if (plusIndex > 0) {
+        final parsed = int.tryParse(raw.substring(plusIndex + 1).trim());
+        return (parsed ?? 0).clamp(0, 1);
+      }
+      if (raw == '24:00') return 1;
+      final startMinutes = _parseTimeMinutes(task.startTime);
+      final endMinutes = _parseTimeMinutes(task.endTime);
+      if (startMinutes != null &&
+          endMinutes != null &&
+          endMinutes <= startMinutes) {
+        return 1;
+      }
+      return 0;
+    }
+
+    Future<void> pickEndDateTime() async {
+      final startDate = parseDate(task.dueDate);
+      if (startDate == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('请先设置开始日期。')),
+        );
+        return;
+      }
+      final startDay = DateTime(startDate.year, startDate.month, startDate.day);
+      final offsetDays = _currentEndOffsetDays();
+      final initialDate = startDay.add(Duration(days: offsetDays));
+
+      final pickedDate = await showDatePicker(
         context: context,
-        initialTime: initial,
+        initialDate: initialDate,
+        firstDate: startDay,
+        lastDate: startDay.add(const Duration(days: 1)),
       );
-      if (picked == null) return;
-      await onUpdateTask(task, startTime: formatTime(picked));
-    }
-
-    Future<void> clearStartTime() async {
-      await onUpdateTask(task, startTime: '');
-    }
-
-    Future<void> pickEndTime() async {
-      final initial = parseTime(task.endTime) ?? TimeOfDay.now();
-      final picked = await showTimePicker(
+      if (pickedDate == null) return;
+      final pickedTime = await showTimePicker(
         context: context,
-        initialTime: initial,
+        initialTime: parseTime(task.endTime) ?? TimeOfDay.now(),
       );
-      if (picked == null) return;
-      await onUpdateTask(task, endTime: formatTime(picked));
+      if (pickedTime == null) return;
+
+      var nextOffset = DateTime(
+        pickedDate.year,
+        pickedDate.month,
+        pickedDate.day,
+      ).difference(startDay).inDays.clamp(0, 1);
+
+      final startMinutes = _parseTimeMinutes(task.startTime);
+      final endMinutes = pickedTime.hour * 60 + pickedTime.minute;
+      var endValue = formatTime(pickedTime);
+
+      if (nextOffset == 0 && startMinutes != null) {
+        if (endMinutes == 0 && startMinutes > 0) {
+          endValue = '24:00';
+        } else if (endMinutes <= startMinutes) {
+          nextOffset = 1;
+        }
+      }
+
+      if (endValue != '24:00' && nextOffset > 0) {
+        endValue = '$endValue+$nextOffset';
+      }
+
+      await onUpdateTask(task, endTime: endValue);
     }
 
-    Future<void> clearEndTime() async {
+    Future<void> clearEndDateTime() async {
       await onUpdateTask(task, endTime: '');
     }
 
@@ -5405,9 +5941,59 @@ class _TaskDetailPanel extends StatelessWidget {
       );
     }
 
-    final dueDateValue = formatDateValue(task.dueDate);
-    final startTimeValue = formatTimeValue(task.startTime);
-    final endTimeValue = formatTimeValue(task.endTime);
+    String formatStartDateTimeValue() {
+      final dateRaw = task.dueDate.trim();
+      final timeRaw = task.startTime.trim();
+      if (dateRaw.isEmpty && timeRaw.isEmpty) return '未设置';
+      final dateLabel = dateRaw.isEmpty ? '' : formatDateValue(dateRaw);
+      final parts = [dateLabel, timeRaw].where((value) => value.isNotEmpty);
+      return parts.isEmpty ? '未设置' : parts.join(' ');
+    }
+
+    String formatEndDateTimeValue() {
+      final raw = task.endTime.trim();
+      if (raw.isEmpty) return '未设置';
+
+      final startDate = parseDate(task.dueDate);
+      final startDay = startDate == null
+          ? null
+          : DateTime(startDate.year, startDate.month, startDate.day);
+
+      final plusIndex = raw.lastIndexOf('+');
+      final hasExplicitOffset = plusIndex > 0;
+      final explicitOffset = hasExplicitOffset
+          ? (int.tryParse(raw.substring(plusIndex + 1).trim()) ?? 0)
+          : 0;
+
+      final timePart =
+          (hasExplicitOffset ? raw.substring(0, plusIndex) : raw).trim();
+      final startMinutes = _parseTimeMinutes(task.startTime);
+      var endMinutes = _parseTimeMinutes(timePart);
+      if (endMinutes == null) return raw;
+
+      var offsetDays = explicitOffset.clamp(0, 1);
+      var displayTime = timePart;
+      if (timePart == '24:00') {
+        offsetDays = (offsetDays + 1).clamp(0, 1);
+        endMinutes = 0;
+        displayTime = '00:00';
+      } else if (!hasExplicitOffset &&
+          startMinutes != null &&
+          endMinutes <= startMinutes) {
+        offsetDays = 1;
+      }
+
+      final dateLabel = startDay == null
+          ? (offsetDays > 0 ? '次日' : '')
+          : DateFormat('M月d日')
+              .format(startDay.add(Duration(days: offsetDays)));
+
+      final parts = [dateLabel, displayTime].where((value) => value.isNotEmpty);
+      return parts.isEmpty ? '未设置' : parts.join(' ');
+    }
+
+    final startAtValue = formatStartDateTimeValue();
+    final endAtValue = formatEndDateTimeValue();
     final remindValue = formatRemindValue(task.remindAt);
     final repeatValue = formatRepeatValue(task.repeatRule);
     final matrixValue = matrixPriorityLabel(task.priority);
@@ -5458,28 +6044,23 @@ class _TaskDetailPanel extends StatelessWidget {
         ),
         const SizedBox(height: 6),
         settingTile(
-          label: '开始日期',
-          value: dueDateValue,
+          label: '开始',
+          value: startAtValue,
           icon: Icons.event,
-          onTap: saving ? null : pickDueDate,
-          onClear: saving || task.dueDate.trim().isEmpty ? null : clearDueDate,
+          onTap: saving ? null : pickStartDateTime,
+          onClear: saving ||
+                  (task.dueDate.trim().isEmpty && task.startTime.trim().isEmpty)
+              ? null
+              : clearStartDateTime,
         ),
         const SizedBox(height: 8),
         settingTile(
-          label: '开始时间',
-          value: startTimeValue,
-          icon: Icons.schedule,
-          onTap: saving ? null : pickStartTime,
-          onClear:
-              saving || task.startTime.trim().isEmpty ? null : clearStartTime,
-        ),
-        const SizedBox(height: 8),
-        settingTile(
-          label: '截止时间',
-          value: endTimeValue,
+          label: '截止',
+          value: endAtValue,
           icon: Icons.timelapse,
-          onTap: saving ? null : pickEndTime,
-          onClear: saving || task.endTime.trim().isEmpty ? null : clearEndTime,
+          onTap: saving ? null : pickEndDateTime,
+          onClear:
+              saving || task.endTime.trim().isEmpty ? null : clearEndDateTime,
         ),
         const SizedBox(height: 8),
         settingTile(
@@ -5671,15 +6252,50 @@ class _TaskDetailPanel extends StatelessWidget {
     if (task.dueDate.trim().isEmpty) return null;
     try {
       final date = DateFormat('yyyy-MM-dd').parse(task.dueDate);
-      final friendly = DateFormat('M月d日').format(date);
-      if (task.startTime.trim().isNotEmpty || task.endTime.trim().isNotEmpty) {
-        final start = task.startTime.trim();
-        final end = task.endTime.trim();
-        final range =
-            [start, end].where((value) => value.isNotEmpty).join(' - ');
-        return '$friendly $range';
+      final startDateLabel = DateFormat('M月d日').format(date);
+      final startTime = task.startTime.trim();
+      final endRaw = task.endTime.trim();
+
+      if (startTime.isEmpty && endRaw.isEmpty) return startDateLabel;
+
+      final startLabel =
+          startTime.isEmpty ? startDateLabel : '$startDateLabel $startTime';
+      if (endRaw.isEmpty) return startLabel;
+
+      final plusIndex = endRaw.lastIndexOf('+');
+      final hasExplicitOffset = plusIndex > 0;
+      final explicitOffset = hasExplicitOffset
+          ? (int.tryParse(endRaw.substring(plusIndex + 1).trim()) ?? 0)
+          : 0;
+      final timePart =
+          (hasExplicitOffset ? endRaw.substring(0, plusIndex) : endRaw).trim();
+
+      var offsetDays = explicitOffset.clamp(0, 1);
+      var displayTime = timePart;
+      if (timePart == '24:00') {
+        offsetDays = 1;
+        displayTime = '00:00';
+      } else if (!hasExplicitOffset) {
+        final startMinutes = _parseTimeMinutes(startTime);
+        final endMinutes = _parseTimeMinutes(timePart);
+        if (startMinutes != null &&
+            endMinutes != null &&
+            endMinutes <= startMinutes) {
+          offsetDays = 1;
+        }
       }
-      return friendly;
+
+      if (offsetDays > 0) {
+        final endDateLabel =
+            DateFormat('M月d日').format(date.add(Duration(days: offsetDays)));
+        return startTime.isEmpty
+            ? '$startDateLabel - $endDateLabel $displayTime'
+            : '$startDateLabel $startTime - $endDateLabel $displayTime';
+      }
+
+      return startTime.isEmpty
+          ? '$startDateLabel $displayTime'
+          : '$startDateLabel $startTime - $displayTime';
     } catch (_) {
       return task.dueDate;
     }

@@ -58,13 +58,15 @@ class PomodoroState {
   final int? currentTaskId;
 
   factory PomodoroState.fromJson(Map<String, dynamic> json) {
+    final targetEnd = _parseInt(json['targetEnd'] ?? json['target_end']);
+    final currentTaskId = _parseInt(json['currentTaskId'] ?? json['current_task_id']);
     return PomodoroState(
       mode: PomodoroModeMeta.parse(json['mode']?.toString()),
       remainingMs: _parseInt(json['remainingMs'] ?? json['remaining_ms']) ?? 0,
       isRunning: json['isRunning'] == true || json['is_running'] == 1,
-      targetEnd: _parseInt(json['targetEnd'] ?? json['target_end']),
+      targetEnd: targetEnd == null || targetEnd <= 0 ? null : targetEnd,
       cycleCount: _parseInt(json['cycleCount'] ?? json['cycle_count']) ?? 0,
-      currentTaskId: _parseInt(json['currentTaskId'] ?? json['current_task_id']),
+      currentTaskId: currentTaskId == null || currentTaskId <= 0 ? null : currentTaskId,
     );
   }
 
@@ -116,4 +118,3 @@ int? _parseInt(dynamic value) {
   if (value is num) return value.toInt();
   return int.tryParse(value.toString());
 }
-

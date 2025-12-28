@@ -121,14 +121,65 @@ class TaskCard extends StatelessWidget {
     if (task.dueDate.trim().isEmpty) return null;
     try {
       final date = DateFormat('yyyy-MM-dd').parse(task.dueDate);
-      final friendly = DateFormat('M月d日').format(date);
-      if (task.startTime.trim().isNotEmpty || task.endTime.trim().isNotEmpty) {
-        final start = task.startTime.trim();
-        final end = task.endTime.trim();
-        final range = [start, end].where((value) => value.isNotEmpty).join(' - ');
-        return '$friendly $range';
+      final startDateLabel = DateFormat('M月d日').format(date);
+      final startTime = task.startTime.trim();
+      final endRaw = task.endTime.trim();
+
+      if (startTime.isEmpty && endRaw.isEmpty) return startDateLabel;
+
+      int? parseTimeMinutes(String raw) {
+        final trimmed = raw.trim();
+        if (trimmed.isEmpty) return null;
+        final timePart = trimmed.split('+').first.trim();
+        final parts = timePart.split(':');
+        if (parts.length != 2) return null;
+        final hour = int.tryParse(parts[0]);
+        final minute = int.tryParse(parts[1]);
+        if (hour == null || minute == null) return null;
+        if (hour < 0 || hour > 24) return null;
+        if (minute < 0 || minute > 59) return null;
+        if (hour == 24 && minute != 0) return null;
+        return hour * 60 + minute;
       }
-      return friendly;
+
+      final startLabel =
+          startTime.isEmpty ? startDateLabel : '$startDateLabel $startTime';
+      if (endRaw.isEmpty) return startLabel;
+
+      final plusIndex = endRaw.lastIndexOf('+');
+      final hasExplicitOffset = plusIndex > 0;
+      final explicitOffset = hasExplicitOffset
+          ? (int.tryParse(endRaw.substring(plusIndex + 1).trim()) ?? 0)
+          : 0;
+      final timePart =
+          (hasExplicitOffset ? endRaw.substring(0, plusIndex) : endRaw).trim();
+
+      var offsetDays = explicitOffset.clamp(0, 1);
+      var displayTime = timePart;
+      if (timePart == '24:00') {
+        offsetDays = 1;
+        displayTime = '00:00';
+      } else if (!hasExplicitOffset) {
+        final startMinutes = parseTimeMinutes(startTime);
+        final endMinutes = parseTimeMinutes(timePart);
+        if (startMinutes != null &&
+            endMinutes != null &&
+            endMinutes <= startMinutes) {
+          offsetDays = 1;
+        }
+      }
+
+      if (offsetDays > 0) {
+        final endDateLabel =
+            DateFormat('M月d日').format(date.add(Duration(days: offsetDays)));
+        return startTime.isEmpty
+            ? '$startDateLabel - $endDateLabel $displayTime'
+            : '$startDateLabel $startTime - $endDateLabel $displayTime';
+      }
+
+      return startTime.isEmpty
+          ? '$startDateLabel $displayTime'
+          : '$startDateLabel $startTime - $displayTime';
     } catch (_) {
       return task.dueDate;
     }

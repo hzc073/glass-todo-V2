@@ -627,6 +627,24 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
               ?.copyWith(fontWeight: FontWeight.w800),
         ),
         const SizedBox(height: 6),
+        DropdownButtonFormField<int>(
+          value: prefs.calendarTimelineDefaultHour,
+          decoration: const InputDecoration(labelText: '时间轴默认时间'),
+          items: [
+            for (var hour = 0; hour < 24; hour++)
+              DropdownMenuItem(
+                value: hour,
+                child: Text('${hour.toString().padLeft(2, '0')}:00'),
+              ),
+          ],
+          onChanged: (value) {
+            _updateSettings(_settings.copyWith(
+                preferences: prefs.copyWith(
+                    calendarTimelineDefaultHour:
+                        value ?? prefs.calendarTimelineDefaultHour)));
+          },
+        ),
+        const SizedBox(height: 12),
         SwitchListTile(
           contentPadding: EdgeInsets.zero,
           value: calendar.taskBlockShowStartTimeDay,

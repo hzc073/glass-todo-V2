@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
@@ -34,7 +35,7 @@ class TimeTrackingView extends StatefulWidget {
   final bool loading;
   final bool saving;
   final DateTime? lastSync;
-  final VoidCallback onRefresh;
+  final Future<void> Function() onRefresh;
   final VoidCallback onAddActivity;
   final Future<void> Function(TimeActivity) onToggleActivity;
   final Future<void> Function(TimeActivity) onEditActivity;
@@ -50,6 +51,8 @@ class _TimeTrackingViewState extends State<TimeTrackingView> {
   DateTime _now = DateTime.now();
 
   bool get _hasRunning => widget.runningEntries.any((entry) => entry.isRunning);
+  bool get _useAndroidUi =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
   @override
   void initState() {
@@ -120,6 +123,8 @@ class _TimeTrackingViewState extends State<TimeTrackingView> {
     final timerColumn = _TimerColumn(
       saving: widget.saving,
       loading: widget.loading,
+      syncLabel: syncLabel,
+      useSquareActivities: _useAndroidUi,
       now: _now,
       currentEntry: currentEntry,
       currentActivity: currentActivity,
@@ -140,6 +145,42 @@ class _TimeTrackingViewState extends State<TimeTrackingView> {
       activityById: activityById,
       onEditEntry: widget.onEditEntry,
     );
+
+    if (_useAndroidUi) {
+      final safeBottom = MediaQuery.of(context).padding.bottom;
+      return Stack(
+        children: [
+          RefreshIndicator(
+            onRefresh: widget.onRefresh,
+            child: timerColumn,
+          ),
+          Positioned(
+            left: 16,
+            bottom: 16 + safeBottom,
+            child: FloatingActionButton.small(
+              heroTag: 'time_tracking_record_fab',
+              onPressed: () => _openRecordSheet(
+                context,
+                recordColumn: recordColumn,
+              ),
+              backgroundColor: AppColors.surface,
+              foregroundColor: AppColors.ink,
+              child: const Icon(Icons.receipt_long),
+            ),
+          ),
+          Positioned(
+            right: 16,
+            bottom: 16 + safeBottom,
+            child: FloatingActionButton(
+              heroTag: 'time_tracking_add_fab',
+              onPressed: widget.saving ? null : widget.onAddActivity,
+              backgroundColor: AppColors.accentCool,
+              child: const Icon(Icons.add, size: 28),
+            ),
+          ),
+        ],
+      );
+    }
 
     if (!twoColumn) {
       return Column(
@@ -193,7 +234,7 @@ class _ActionsRow extends StatelessWidget {
   final bool loading;
   final String syncLabel;
   final VoidCallback onAdd;
-  final VoidCallback onRefresh;
+  final Future<void> Function() onRefresh;
 
   @override
   Widget build(BuildContext context) {
@@ -209,7 +250,7 @@ class _ActionsRow extends StatelessWidget {
           ),
           const SizedBox(height: 10),
           OutlinedButton.icon(
-            onPressed: loading ? null : onRefresh,
+            onPressed: loading ? null : () => onRefresh(),
             icon: const Icon(Icons.refresh),
             label: const Text('刷新'),
           ),
@@ -231,7 +272,7 @@ class _ActionsRow extends StatelessWidget {
         ),
         const SizedBox(width: 12),
         OutlinedButton.icon(
-          onPressed: loading ? null : onRefresh,
+          onPressed: loading ? null : () => onRefresh(),
           icon: const Icon(Icons.refresh),
           label: const Text('刷新'),
         ),
@@ -249,6 +290,8 @@ class _TimerColumn extends StatelessWidget {
   const _TimerColumn({
     required this.saving,
     required this.loading,
+    required this.syncLabel,
+    required this.useSquareActivities,
     required this.now,
     required this.currentEntry,
     required this.currentActivity,
@@ -263,6 +306,8 @@ class _TimerColumn extends StatelessWidget {
 
   final bool saving;
   final bool loading;
+  final String syncLabel;
+  final bool useSquareActivities;
   final DateTime now;
   final TimeEntry? currentEntry;
   final TimeActivity? currentActivity;
@@ -304,28 +349,61 @@ class _TimerColumn extends StatelessWidget {
             style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
           ),
           const Spacer(),
-          Text(
-            '${activities.length} 个',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(color: AppColors.inkSoft),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(
+                '${activities.length} 个',
+                style: Theme.of(context)
+                    .textTheme
+                    .bodySmall
+                    ?.copyWith(color: AppColors.inkSoft),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                syncLabel,
+                style: Theme.of(context)
+                    .textTheme
+                    .labelSmall
+                    ?.copyWith(color: AppColors.inkSoft),
+              ),
+            ],
           ),
         ],
       ),
       const SizedBox(height: 10),
-      Wrap(
-        spacing: 10,
-        runSpacing: 10,
-        children: [
-          for (final activity in activities)
-            _ActivityChip(
-              activity: activity,
-              running: runningActivityIds.contains(activity.id),
-              disabled: saving,
-              onTap: () => onToggleActivity(activity),
-              onLongPress: () => onEditActivity(activity),
-              onDelete: () => onDeleteActivity(activity),
-            ),
-        ],
-      ),
+      if (useSquareActivities)
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            for (final activity in activities)
+              _ActivitySquareTile(
+                activity: activity,
+                running: runningActivityIds.contains(activity.id),
+                disabled: saving,
+                onTap: () => onToggleActivity(activity),
+                onEdit: () => onEditActivity(activity),
+                onDelete: () => onDeleteActivity(activity),
+              ),
+          ],
+        )
+      else
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            for (final activity in activities)
+              _ActivityChip(
+                activity: activity,
+                running: runningActivityIds.contains(activity.id),
+                disabled: saving,
+                onTap: () => onToggleActivity(activity),
+                onLongPress: () => onEditActivity(activity),
+                onDelete: () => onDeleteActivity(activity),
+              ),
+          ],
+        ),
     ];
 
     return Container(
@@ -336,6 +414,7 @@ class _TimerColumn extends StatelessWidget {
         borderRadius: BorderRadius.circular(16),
       ),
       child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
         children: list,
       ),
     );
@@ -424,6 +503,7 @@ class _RecordColumn extends StatelessWidget {
           const SizedBox(height: 10),
           Expanded(
             child: ListView.separated(
+              physics: const AlwaysScrollableScrollPhysics(),
               itemCount: rows.length,
               separatorBuilder: (_, __) => const SizedBox(height: 10),
               itemBuilder: (context, index) {
@@ -707,6 +787,230 @@ class _ActivityChip extends StatelessWidget {
       ),
     );
   }
+}
+
+class _ActivitySquareTile extends StatelessWidget {
+  const _ActivitySquareTile({
+    required this.activity,
+    required this.running,
+    required this.disabled,
+    required this.onTap,
+    required this.onEdit,
+    required this.onDelete,
+  });
+
+  static const double _size = 104;
+
+  final TimeActivity activity;
+  final bool running;
+  final bool disabled;
+  final VoidCallback onTap;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final activityColor = _parseHexColor(activity.color) ?? AppColors.accentSoft;
+    final title = activity.name.trim().isEmpty ? '未命名活动' : activity.name.trim();
+    final bg = running ? activityColor.withOpacity(0.18) : Colors.white.withOpacity(0.85);
+    final border = running ? activityColor.withOpacity(0.8) : AppColors.outline;
+
+    Future<void> openMenu() async {
+      if (disabled) return;
+      final action = await showModalBottomSheet<_ActivityMenuAction>(
+        context: context,
+        showDragHandle: true,
+        builder: (context) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.edit),
+                title: const Text('编辑活动'),
+                onTap: () {
+                  Navigator.of(context).pop(_ActivityMenuAction.edit);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.delete_outline),
+                title: const Text('删除活动'),
+                onTap: () {
+                  Navigator.of(context).pop(_ActivityMenuAction.delete);
+                },
+              ),
+              const SizedBox(height: 6),
+            ],
+          ),
+        ),
+      );
+      switch (action) {
+        case _ActivityMenuAction.edit:
+          onEdit();
+          break;
+        case _ActivityMenuAction.delete:
+          onDelete();
+          break;
+        case null:
+          break;
+      }
+    }
+
+    return SizedBox(
+      width: _size,
+      height: _size,
+      child: Material(
+        type: MaterialType.transparency,
+        child: InkWell(
+          onTap: disabled ? null : onTap,
+          onLongPress: disabled ? null : openMenu,
+          borderRadius: BorderRadius.circular(16),
+          child: Ink(
+            decoration: BoxDecoration(
+              color: bg,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: border),
+            ),
+            child: Stack(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+                  child: Column(
+                    children: [
+                      Expanded(
+                        child: Center(
+                          child: Container(
+                            width: 42,
+                            height: 42,
+                            decoration: BoxDecoration(
+                              color: activityColor.withOpacity(0.22),
+                              shape: BoxShape.circle,
+                            ),
+                            alignment: Alignment.center,
+                            child: Text(
+                              _activityIcon(activity, title),
+                              style: _emojiStyle(
+                                Theme.of(context).textTheme.labelLarge,
+                                color: AppColors.ink,
+                                fontSize: 20,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      SizedBox(
+                        height: 36,
+                        child: _AutoFittingText(
+                          title,
+                          maxLines: 3,
+                          maxFontSize: 13,
+                          minFontSize: 8,
+                          style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                                fontWeight: FontWeight.w700,
+                                color: AppColors.ink,
+                              ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Positioned(
+                  top: 2,
+                  right: 2,
+                  child: IconButton(
+                    onPressed: disabled ? null : openMenu,
+                    icon: const Icon(Icons.more_vert, size: 18),
+                    color: AppColors.inkSoft,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints.tightFor(
+                      width: 30,
+                      height: 30,
+                    ),
+                    tooltip: '更多',
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+enum _ActivityMenuAction { edit, delete }
+
+class _AutoFittingText extends StatelessWidget {
+  const _AutoFittingText(
+    this.text, {
+    required this.maxLines,
+    required this.maxFontSize,
+    required this.minFontSize,
+    required this.style,
+    required this.textAlign,
+  });
+
+  final String text;
+  final int maxLines;
+  final double maxFontSize;
+  final double minFontSize;
+  final TextStyle? style;
+  final TextAlign textAlign;
+
+  @override
+  Widget build(BuildContext context) {
+    final baseStyle = style ?? Theme.of(context).textTheme.bodySmall;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final direction = Directionality.of(context);
+        double chosen = minFontSize;
+        for (double size = maxFontSize; size >= minFontSize; size -= 1) {
+          final painter = TextPainter(
+            text: TextSpan(text: text, style: baseStyle?.copyWith(fontSize: size)),
+            textDirection: direction,
+            maxLines: maxLines,
+          )..layout(maxWidth: constraints.maxWidth);
+          if (!painter.didExceedMaxLines &&
+              painter.height <= constraints.maxHeight + 0.5) {
+            chosen = size;
+            break;
+          }
+        }
+        return Text(
+          text,
+          maxLines: maxLines,
+          softWrap: true,
+          textAlign: textAlign,
+          style: baseStyle?.copyWith(fontSize: chosen),
+        );
+      },
+    );
+  }
+}
+
+Future<void> _openRecordSheet(
+  BuildContext context, {
+  required Widget recordColumn,
+}) async {
+  final height = MediaQuery.of(context).size.height * 0.85;
+  await showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    showDragHandle: true,
+    backgroundColor: Colors.transparent,
+    builder: (context) => SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        child: SizedBox(
+          height: height,
+          child: recordColumn,
+        ),
+      ),
+    ),
+  );
 }
 
 class _EntryCard extends StatelessWidget {

@@ -28,18 +28,20 @@ class TimeEntry {
   bool get isRunning => endedAt == null;
 
   factory TimeEntry.fromJson(Map<String, dynamic> json) {
+    final endedAt = _parseInt(json['endedAt'] ?? json['ended_at']);
+    final deletedAt = _parseInt(json['deletedAt'] ?? json['deleted_at']);
     return TimeEntry(
       id: (json['id'] ?? '').toString(),
       activityId: (json['activityId'] ?? json['activity_id'] ?? '').toString(),
       taskId: (json['taskId'] ?? json['task_id'])?.toString(),
       startedAt: _parseInt(json['startedAt'] ?? json['started_at']) ?? 0,
-      endedAt: _parseInt(json['endedAt'] ?? json['ended_at']),
+      endedAt: endedAt == null || endedAt <= 0 ? null : endedAt,
       durationMs: _parseInt(json['durationMs'] ?? json['duration_ms']),
       note: (json['note'] ?? '').toString(),
       tags: _parseStringList(json['tags']),
       createdAt: _parseInt(json['createdAt'] ?? json['created_at']) ?? 0,
       updatedAt: _parseInt(json['updatedAt'] ?? json['updated_at']) ?? 0,
-      deletedAt: _parseInt(json['deletedAt'] ?? json['deleted_at']),
+      deletedAt: deletedAt == null || deletedAt <= 0 ? null : deletedAt,
     );
   }
 

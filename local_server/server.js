@@ -590,6 +590,7 @@ const getUserSettingsDefaults = () => ({
         theme: 'system',
         colorTheme: 'default',
         weekStart: 'monday',
+        calendarTimelineDefaultHour: 8,
         shortcutsEnabled: true,
         naturalLanguageEnabled: true,
         matrixScope: 'today',
@@ -710,6 +711,12 @@ const sanitizeUserSettings = (input = {}) => {
         : defaults.preferences.matrixScope;
     const matrixTodayOnly = matrixScope === 'today';
     const weekStart = pickOne(preferences.weekStart, ['monday', 'sunday'], defaults.preferences.weekStart);
+    const calendarTimelineDefaultHour = clampInt(
+        preferences.calendarTimelineDefaultHour,
+        defaults.preferences.calendarTimelineDefaultHour,
+        0,
+        23
+    );
 
     const notificationsEnabled = typeof notifications.enabled === 'boolean'
         ? notifications.enabled
@@ -728,6 +735,7 @@ const sanitizeUserSettings = (input = {}) => {
             theme,
             colorTheme,
             weekStart,
+            calendarTimelineDefaultHour,
             shortcutsEnabled: parseBoolStrict(preferences.shortcutsEnabled, defaults.preferences.shortcutsEnabled),
             naturalLanguageEnabled: parseBoolStrict(preferences.naturalLanguageEnabled, defaults.preferences.naturalLanguageEnabled),
             matrixScope,

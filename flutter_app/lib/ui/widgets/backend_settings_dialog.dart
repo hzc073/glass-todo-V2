@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../app_theme.dart';
@@ -25,6 +26,8 @@ class _BackendSettingsDialogState extends State<_BackendSettingsDialog> {
   late final TextEditingController _controller;
   String? _errorText;
 
+  bool get _isAndroid => !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
   @override
   void initState() {
     super.initState();
@@ -39,6 +42,9 @@ class _BackendSettingsDialogState extends State<_BackendSettingsDialog> {
 
   @override
   Widget build(BuildContext context) {
+    const androidEmulatorUrl = 'http://10.0.2.2:3000';
+    const localhostUrl = 'http://localhost:3000';
+
     return AlertDialog(
       title: const Text('后端地址设置'),
       content: SizedBox(
@@ -56,6 +62,34 @@ class _BackendSettingsDialogState extends State<_BackendSettingsDialog> {
                 errorText: _errorText,
               ),
               keyboardType: TextInputType.url,
+            ),
+            const SizedBox(height: 10),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  ActionChip(
+                    label: Text(
+                      _isAndroid ? '填入 Android 模拟器默认地址' : '填入 localhost:3000',
+                    ),
+                    onPressed: () {
+                      _controller.text =
+                          _isAndroid ? androidEmulatorUrl : localhostUrl;
+                      setState(() => _errorText = null);
+                    },
+                  ),
+                  if (_isAndroid)
+                    ActionChip(
+                      label: const Text('填入 localhost:3000（adb reverse）'),
+                      onPressed: () {
+                        _controller.text = localhostUrl;
+                        setState(() => _errorText = null);
+                      },
+                    ),
+                ],
+              ),
             ),
             const SizedBox(height: 8),
             Text(

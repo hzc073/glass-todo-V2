@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:intl/intl.dart';
 import 'dart:math' as math;
 
@@ -24,6 +25,7 @@ class CalendarView extends StatefulWidget {
     required this.loading,
     required this.saving,
     required this.settings,
+    required this.timelineDefaultHour,
     required this.initialMode,
     required this.loadHolidayCnYear,
     required this.onCreateTask,
@@ -36,6 +38,7 @@ class CalendarView extends StatefulWidget {
   final bool loading;
   final bool saving;
   final CalendarSettings settings;
+  final int timelineDefaultHour;
   final CalendarMode initialMode;
   final Future<HolidayCnYear> Function(int year) loadHolidayCnYear;
   final Future<Task?> Function({
@@ -65,6 +68,7 @@ class _CalendarViewState extends State<CalendarView> {
   DateTime _focusDate = _stripTime(DateTime.now());
 
   final ScrollController _timelineScroll = ScrollController();
+  bool _didAutoJumpToDefaultTimeline = false;
 
   final Map<int, Map<String, HolidayCnDay>> _holidayByYear = {};
   final Set<int> _loadingHolidayYears = <int>{};
@@ -76,9 +80,21 @@ class _CalendarViewState extends State<CalendarView> {
     _mode = widget.initialMode;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      _jumpToHour(8);
+      _autoJumpToDefaultTimeline();
       _prefetchHolidaysForVisibleRange();
     });
+  }
+
+  @override
+  void didUpdateWidget(covariant CalendarView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.timelineDefaultHour != widget.timelineDefaultHour) {
+      _didAutoJumpToDefaultTimeline = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _autoJumpToDefaultTimeline();
+      });
+    }
   }
 
   @override
@@ -123,38 +139,58 @@ class _CalendarViewState extends State<CalendarView> {
       CalendarMode.week => _weekLabel(_focusDate),
       CalendarMode.month => _monthLabelFormatter.format(_focusDate),
     };
-    return Row(
+
+    void setMode(CalendarMode mode) {
+      setState(() {
+        _mode = mode;
+        _prefetchHolidaysForVisibleRange();
+      });
+      if ((mode == CalendarMode.day || mode == CalendarMode.week) &&
+          !_didAutoJumpToDefaultTimeline) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          _autoJumpToDefaultTimeline();
+        });
+      }
+    }
+
+    void goToday() {
+      setState(() {
+        _focusDate = _stripTime(DateTime.now());
+        _prefetchHolidaysForVisibleRange();
+      });
+    }
+
+    final modeToggle = ToggleButtons(
+      isSelected: isSelected,
+      onPressed:
+          widget.saving ? null : (index) => setMode(CalendarMode.values[index]),
+      borderRadius: BorderRadius.circular(12),
+      constraints: const BoxConstraints(minHeight: 40, minWidth: 44),
+      children: const [
+        Text('日'),
+        Text('周'),
+        Text('月'),
+      ],
+    );
+
+    final navRow = Row(
       children: [
-        ToggleButtons(
-          isSelected: isSelected,
-          onPressed: widget.saving
-              ? null
-              : (index) {
-                  setState(() {
-                    _mode = CalendarMode.values[index];
-                    _prefetchHolidaysForVisibleRange();
-                  });
-                },
-          borderRadius: BorderRadius.circular(12),
-          constraints: const BoxConstraints(minHeight: 40, minWidth: 44),
-          children: const [
-            Text('日'),
-            Text('周'),
-            Text('月'),
-          ],
-        ),
-        const SizedBox(width: 12),
         IconButton(
           onPressed: widget.saving ? null : _goPrev,
           icon: const Icon(Icons.chevron_left),
           tooltip: '上一页',
         ),
-        Text(
-          rangeLabel,
-          style: Theme.of(context)
-              .textTheme
-              .titleMedium
-              ?.copyWith(fontWeight: FontWeight.w700),
+        Expanded(
+          child: Text(
+            rangeLabel,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context)
+                .textTheme
+                .titleMedium
+                ?.copyWith(fontWeight: FontWeight.w700),
+          ),
         ),
         IconButton(
           onPressed: widget.saving ? null : _goNext,
@@ -163,17 +199,34 @@ class _CalendarViewState extends State<CalendarView> {
         ),
         const SizedBox(width: 8),
         TextButton(
-          onPressed: widget.saving
-              ? null
-              : () {
-                  setState(() {
-                    _focusDate = _stripTime(DateTime.now());
-                    _prefetchHolidaysForVisibleRange();
-                  });
-                },
+          onPressed: widget.saving ? null : goToday,
           child: const Text('今天'),
         ),
       ],
+    );
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isNarrow = constraints.maxWidth < 520;
+        if (!isNarrow) {
+          return Row(
+            children: [
+              modeToggle,
+              const SizedBox(width: 12),
+              Expanded(child: navRow),
+            ],
+          );
+        }
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            modeToggle,
+            const SizedBox(height: 8),
+            navRow,
+          ],
+        );
+      },
     );
   }
 
@@ -234,55 +287,79 @@ class _CalendarViewState extends State<CalendarView> {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final dayWidth = (constraints.maxWidth - _axisWidth) / 7;
+        final computedWidth = (constraints.maxWidth - _axisWidth) / 7;
+        final minWidth = constraints.maxWidth < 720 ? 112.0 : computedWidth;
+        final dayWidth = computedWidth < minWidth ? minWidth : computedWidth;
+        final needsHorizontalScroll =
+            _axisWidth + dayWidth * days.length > constraints.maxWidth + 0.5;
+
+        Widget maybeScroll(Widget child) {
+          if (!needsHorizontalScroll) return child;
+          return SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: child,
+          );
+        }
+
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                const SizedBox(width: _axisWidth),
-                for (final day in days)
-                  SizedBox(
-                    width: dayWidth,
-                    child: _WeekDayHeader(
-                      date: day,
-                      lunarLabel: ChineseLunar.format(day),
-                      holiday: _holidayFor(day),
-                      onTap: widget.saving
-                          ? null
-                          : () {
-                              setState(() {
-                                _focusDate = day;
-                                _mode = CalendarMode.day;
-                                _prefetchHolidaysForVisibleRange();
-                              });
-                            },
+            maybeScroll(
+              Row(
+                children: [
+                  const SizedBox(width: _axisWidth),
+                  for (final day in days)
+                    SizedBox(
+                      width: dayWidth,
+                      child: _WeekDayHeader(
+                        date: day,
+                        lunarLabel: ChineseLunar.format(day),
+                        holiday: _holidayFor(day),
+                        onTap: widget.saving
+                            ? null
+                            : () {
+                                setState(() {
+                                  _focusDate = day;
+                                  _mode = CalendarMode.day;
+                                  _prefetchHolidaysForVisibleRange();
+                                });
+                                if (!_didAutoJumpToDefaultTimeline) {
+                                  WidgetsBinding.instance
+                                      .addPostFrameCallback((_) {
+                                    if (!mounted) return;
+                                    _autoJumpToDefaultTimeline();
+                                  });
+                                }
+                              },
+                      ),
                     ),
-                  ),
-              ],
+                ],
+              ),
             ),
             const SizedBox(height: 10),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const SizedBox(width: _axisWidth),
-                for (final day in days)
-                  SizedBox(
-                    width: dayWidth,
-                    child: _AllDayCell(
-                      date: day,
-                      tasks: (tasksByDayKey[_dateFormatter.format(day)] ??
-                              const [])
-                          .where(
-                              (t) => _parseTimeToMinutes(t.startTime) == null)
-                          .toList(),
-                      onCreate: widget.saving
-                          ? null
-                          : () => _promptCreateTask(day, null),
-                      onReschedule: widget.saving ? null : _rescheduleTask,
+            maybeScroll(
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const SizedBox(width: _axisWidth),
+                  for (final day in days)
+                    SizedBox(
+                      width: dayWidth,
+                      child: _AllDayCell(
+                        date: day,
+                        tasks: (tasksByDayKey[_dateFormatter.format(day)] ??
+                                const [])
+                            .where(
+                                (t) => _parseTimeToMinutes(t.startTime) == null)
+                            .toList(),
+                        onCreate: widget.saving
+                            ? null
+                            : () => _promptCreateTask(day, null),
+                        onReschedule: widget.saving ? null : _rescheduleTask,
+                      ),
                     ),
-                  ),
-              ],
+                ],
+              ),
             ),
             const SizedBox(height: 10),
             Expanded(
@@ -404,6 +481,13 @@ class _CalendarViewState extends State<CalendarView> {
                               _mode = CalendarMode.day;
                               _prefetchHolidaysForVisibleRange();
                             });
+                            if (!_didAutoJumpToDefaultTimeline) {
+                              WidgetsBinding.instance
+                                  .addPostFrameCallback((_) {
+                                if (!mounted) return;
+                                _autoJumpToDefaultTimeline();
+                              });
+                            }
                           },
                     onDrop: widget.saving
                         ? null
@@ -424,14 +508,23 @@ class _CalendarViewState extends State<CalendarView> {
   Future<void> _promptCreateTask(DateTime date, TimeOfDay? time) async {
     final controller = TextEditingController();
     final label = time == null ? '全天' : time.format(context);
+    String draft = '';
     final title = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text('添加任务 · $label'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(hintText: '任务标题（可为空）'),
+        content: StatefulBuilder(
+          builder: (context, setState) => TextField(
+            controller: controller,
+            autofocus: true,
+            decoration: InputDecoration(
+              hintText: '任务标题',
+              helperText: '必填',
+              errorText:
+                  draft.isNotEmpty && draft.trim().isEmpty ? '请输入任务标题' : null,
+            ),
+            onChanged: (value) => setState(() => draft = value),
+          ),
         ),
         actions: [
           TextButton(
@@ -439,7 +532,9 @@ class _CalendarViewState extends State<CalendarView> {
             child: const Text('取消'),
           ),
           ElevatedButton(
-            onPressed: () => Navigator.of(context).pop(controller.text),
+            onPressed: draft.trim().isEmpty
+                ? null
+                : () => Navigator.of(context).pop(controller.text),
             child: const Text('添加'),
           ),
         ],
@@ -448,7 +543,9 @@ class _CalendarViewState extends State<CalendarView> {
     controller.dispose();
     if (!mounted) return;
     if (title == null) return;
-    await widget.onCreateTask(title: title.trim(), date: date, startTime: time);
+    final trimmed = title.trim();
+    if (trimmed.isEmpty) return;
+    await widget.onCreateTask(title: trimmed, date: date, startTime: time);
   }
 
   Future<void> _rescheduleTask(
@@ -500,6 +597,14 @@ class _CalendarViewState extends State<CalendarView> {
       _timelineScroll
           .jumpTo(target.clamp(0, _timelineScroll.position.maxScrollExtent));
     }
+  }
+
+  void _autoJumpToDefaultTimeline() {
+    if (_didAutoJumpToDefaultTimeline) return;
+    if (_mode == CalendarMode.month) return;
+    if (!_timelineScroll.hasClients) return;
+    _jumpToHour(widget.timelineDefaultHour);
+    _didAutoJumpToDefaultTimeline = true;
   }
 
   List<Task> _tasksForDate(DateTime date) {
@@ -956,36 +1061,51 @@ class _TimelineView extends StatelessWidget {
         final effectiveDayWidth = dayWidth ?? (availableWidth / dayCount);
         final gridWidth = effectiveDayWidth * dayCount;
         final gridHeight = _hourHeight * 24;
-        return SingleChildScrollView(
-          controller: scrollController,
-          child: SizedBox(
-            height: gridHeight,
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                SizedBox(
-                    width: _axisWidth,
-                    height: gridHeight,
-                    child: const _TimeAxisColumn()),
-                SizedBox(
-                  width: gridWidth,
-                  height: gridHeight,
-                  child: _TimeGrid(
-                    dayCount: dayCount,
-                    dayWidth: effectiveDayWidth,
-                    dayForIndex: dayForIndex,
-                    tasks: tasks,
-                    showTaskStartTime: showTaskStartTime,
-                    showTaskTags: showTaskTags,
-                    onTapSlot: onTapSlot,
-                    onDropTask: onDropTask,
-                    onResizeTask: onResizeTask,
-                    onToggleTask: onToggleTask,
-                    onOpenTask: onOpenTask,
-                  ),
+        final content = SizedBox(
+          height: gridHeight,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: _axisWidth,
+                height: gridHeight,
+                child: const _TimeAxisColumn(),
+              ),
+              SizedBox(
+                width: gridWidth,
+                height: gridHeight,
+                child: _TimeGrid(
+                  dayCount: dayCount,
+                  dayWidth: effectiveDayWidth,
+                  dayForIndex: dayForIndex,
+                  tasks: tasks,
+                  showTaskStartTime: showTaskStartTime,
+                  showTaskTags: showTaskTags,
+                  onTapSlot: onTapSlot,
+                  onDropTask: onDropTask,
+                  onResizeTask: onResizeTask,
+                  onToggleTask: onToggleTask,
+                  onOpenTask: onOpenTask,
                 ),
-              ],
-            ),
+              ),
+            ],
+          ),
+        );
+
+        final vertical = SingleChildScrollView(
+          controller: scrollController,
+          child: content,
+        );
+
+        final needsHorizontalScroll =
+            _axisWidth + gridWidth > constraints.maxWidth + 0.5;
+        if (!needsHorizontalScroll) return vertical;
+
+        return SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: SizedBox(
+            width: _axisWidth + gridWidth,
+            child: vertical,
           ),
         );
       },
@@ -1593,6 +1713,25 @@ class _TimelineTaskBlock extends StatelessWidget {
       ),
     );
 
+    final useImmediateDrag = kIsWeb ||
+        defaultTargetPlatform == TargetPlatform.windows ||
+        defaultTargetPlatform == TargetPlatform.macOS ||
+        defaultTargetPlatform == TargetPlatform.linux;
+
+    if (useImmediateDrag) {
+      return Draggable<_TaskDragPayload>(
+        data: _TaskDragPayload(task),
+        dragAnchorStrategy: pointerDragAnchorStrategy,
+        feedback: Material(
+          color: Colors.transparent,
+          child:
+              Opacity(opacity: 0.95, child: SizedBox(width: 240, child: body)),
+        ),
+        childWhenDragging: Opacity(opacity: 0.35, child: body),
+        child: interactive,
+      );
+    }
+
     return LongPressDraggable<_TaskDragPayload>(
       data: _TaskDragPayload(task),
       dragAnchorStrategy: pointerDragAnchorStrategy,
@@ -1685,13 +1824,13 @@ class _ResizableTaskBlockState extends State<_ResizableTaskBlock> {
   }
 
   Widget _buildHandle({required bool top}) {
-    final handleColor = AppColors.inkSoft.withOpacity(0.45);
+    final handleColor = AppColors.inkSoft.withOpacity(0.6);
     return Positioned(
       left: 0,
       right: 0,
       top: top ? 0 : null,
       bottom: top ? null : 0,
-      height: 10,
+      height: 14,
       child: Align(
         alignment: top ? Alignment.topCenter : Alignment.bottomCenter,
         child: GestureDetector(
@@ -1701,12 +1840,12 @@ class _ResizableTaskBlockState extends State<_ResizableTaskBlock> {
           onVerticalDragEnd: (_) => _endResize(),
           onVerticalDragCancel: () => _endResize(),
           child: SizedBox(
-            width: 52,
-            height: 10,
+            width: 60,
+            height: 14,
             child: Center(
               child: Container(
-                width: 22,
-                height: 2,
+                width: 28,
+                height: 3,
                 decoration: BoxDecoration(
                   color: handleColor,
                   borderRadius: BorderRadius.circular(999),
@@ -1784,9 +1923,9 @@ class _MonthDayCell extends StatelessWidget {
             color: bg,
             border: Border.all(color: borderColor),
           ),
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              final textScale = MediaQuery.textScaleFactorOf(context);
+	          child: LayoutBuilder(
+	            builder: (context, constraints) {
+	              final textScale = MediaQuery.textScaleFactorOf(context);
               final dayStyle = Theme.of(context).textTheme.titleSmall?.copyWith(
                     fontWeight: FontWeight.w800,
                     color: textColor,
@@ -1808,19 +1947,19 @@ class _MonthDayCell extends StatelessWidget {
                 return 8.5;
               }
 
-              final taskFontSize =
-                  taskFontSizeForCount(orderedTasks.length) + 2;
-              final taskStyle =
-                  Theme.of(context).textTheme.labelSmall?.copyWith(
-                        color: AppColors.ink,
-                        fontWeight: FontWeight.w700,
-                        fontSize: taskFontSize,
-                        height: 1.0,
-                      );
-              final holidayStyle =
-                  Theme.of(context).textTheme.labelSmall?.copyWith(
-                        fontWeight: FontWeight.w800,
-                        fontSize: 10,
+	              final baseTaskFontSize =
+	                  taskFontSizeForCount(orderedTasks.length) + 2;
+	              TextStyle? taskStyle =
+	                  Theme.of(context).textTheme.labelSmall?.copyWith(
+	                        color: AppColors.ink,
+	                        fontWeight: FontWeight.w700,
+	                        fontSize: baseTaskFontSize,
+	                        height: 1.0,
+	                      );
+	              final holidayStyle =
+	                  Theme.of(context).textTheme.labelSmall?.copyWith(
+	                        fontWeight: FontWeight.w800,
+	                        fontSize: 10,
                         height: 1.0,
                       );
 
@@ -1839,29 +1978,58 @@ class _MonthDayCell extends StatelessWidget {
                   holiday == null ? 0.0 : lineHeight(holidayStyle, 10) + 6;
               final headerLine =
                   textLine > badgeHeight ? textLine : badgeHeight;
-              final reservedHeight = headerLine + contentGap;
-              final available = (constraints.maxHeight - reservedHeight)
-                  .clamp(0.0, double.infinity)
-                  .toDouble();
-              final taskLine = lineHeight(taskStyle, taskFontSize);
-              const checkboxSize = 16.0;
-              final taskRowHeight =
-                  taskLine > checkboxSize ? taskLine : checkboxSize;
-              const taskGap = 1.0;
+	              final reservedHeight = headerLine + contentGap;
+	              final available = (constraints.maxHeight - reservedHeight)
+	                  .clamp(0.0, double.infinity)
+	                  .toDouble();
 
-              int fitLines(double space) {
-                const safety = 4.0;
-                space = (space - safety).clamp(0.0, double.infinity);
-                if (space + 0.5 < taskRowHeight) return 0;
-                final perLine = taskRowHeight + taskGap;
-                final count = ((space + taskGap) / perLine).floor();
-                return count.clamp(0, 6);
-              }
+	              var showCheckbox = constraints.maxWidth >= 110;
+	              var showStartTimeInline = showTaskStartTime;
+	              var showTagsInline = showTaskTags;
+	              var titleMaxLines = 1;
+	              if (constraints.maxWidth < 110) {
+	                showStartTimeInline = false;
+	                showTagsInline = false;
+	              }
 
-              final maxLines = fitLines(available);
-              final visible = orderedTasks.take(maxLines).toList();
-              final remaining =
-                  (orderedTasks.length - visible.length).clamp(0, 9999);
+	              double taskLine = lineHeight(taskStyle, baseTaskFontSize);
+	              double taskRowHeight;
+	              if (showCheckbox) {
+	                const checkboxSize = 16.0;
+	                taskRowHeight =
+	                    taskLine > checkboxSize ? taskLine : checkboxSize;
+	              } else {
+	                taskRowHeight = taskLine;
+	              }
+	              const taskGap = 1.0;
+
+	              int fitLines(double space) {
+	                const safety = 4.0;
+	                space = (space - safety).clamp(0.0, double.infinity);
+	                if (space + 0.5 < taskRowHeight) return 0;
+	                final perLine = taskRowHeight + taskGap;
+	                final count = ((space + taskGap) / perLine).floor();
+	                return count.clamp(0, 6);
+	              }
+
+	              var maxLines = fitLines(available);
+	              if (maxLines == 0 && orderedTasks.isNotEmpty) {
+	                showCheckbox = false;
+	                showStartTimeInline = false;
+	                showTagsInline = false;
+
+	                final compactFontSize =
+	                    math.min<double>(baseTaskFontSize, 9.0);
+	                taskStyle = taskStyle?.copyWith(fontSize: compactFontSize);
+	                taskLine = lineHeight(taskStyle, compactFontSize);
+	                taskRowHeight =
+	                    math.min<double>(available, (taskLine * 2.2).clamp(12.0, 40.0));
+	                titleMaxLines = taskRowHeight >= taskLine * 2 - 0.5 ? 2 : 1;
+	                maxLines = 1;
+	              }
+	              final visible = orderedTasks.take(maxLines).toList();
+	              final remaining =
+	                  (orderedTasks.length - visible.length).clamp(0, 9999);
               void openAllTasks() {
                 final sheetTasks = List<Task>.from(orderedTasks);
                 showModalBottomSheet<void>(
@@ -2028,19 +2196,21 @@ class _MonthDayCell extends StatelessWidget {
                                   ],
                                 ],
                               ),
-                              const SizedBox(height: contentGap),
-                              for (var i = 0; i < visible.length; i++) ...[
-                                if (i > 0) const SizedBox(height: taskGap),
-                                _MonthTaskLine(
-                                  task: visible[i],
-                                  style: taskStyle,
-                                  height: taskRowHeight,
-                                  showStartTime: showTaskStartTime,
-                                  showTags: showTaskTags,
-                                  onTap: onOpenTask == null
-                                      ? openAllTasks
-                                      : () => onOpenTask?.call(visible[i]),
-                                  onLongPress: openAllTasks,
+	                              const SizedBox(height: contentGap),
+	                              for (var i = 0; i < visible.length; i++) ...[
+	                                if (i > 0) const SizedBox(height: taskGap),
+	                                _MonthTaskLine(
+	                                  task: visible[i],
+	                                  style: taskStyle,
+	                                  height: taskRowHeight,
+	                                  showCheckbox: showCheckbox,
+	                                  titleMaxLines: titleMaxLines,
+	                                  showStartTime: showStartTimeInline,
+	                                  showTags: showTagsInline,
+	                                  onTap: onOpenTask == null
+	                                      ? openAllTasks
+	                                      : () => onOpenTask?.call(visible[i]),
+	                                  onLongPress: openAllTasks,
                                   onToggle: onToggleTask == null
                                       ? null
                                       : () {
@@ -2107,6 +2277,8 @@ class _MonthTaskLine extends StatelessWidget {
     required this.task,
     required this.style,
     required this.height,
+    required this.showCheckbox,
+    this.titleMaxLines = 1,
     required this.showStartTime,
     required this.showTags,
     this.onTap,
@@ -2117,6 +2289,8 @@ class _MonthTaskLine extends StatelessWidget {
   final Task task;
   final TextStyle? style;
   final double height;
+  final bool showCheckbox;
+  final int titleMaxLines;
   final bool showStartTime;
   final bool showTags;
   final VoidCallback? onTap;
@@ -2146,41 +2320,46 @@ class _MonthTaskLine extends StatelessWidget {
     final start = showStartTime ? task.startTime.trim() : '';
     final metaStyle = baseStyle?.copyWith(fontWeight: FontWeight.w700);
 
-    final checkbox = InkWell(
-      onTap: onToggle,
-      borderRadius: BorderRadius.circular(4),
-      child: Container(
-        width: 16,
-        height: 16,
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(4),
-          border: Border.all(color: fg.withOpacity(0.9), width: 1.6),
-          color: isDone ? AppColors.accentCool : Colors.transparent,
-        ),
-        child: isDone
-            ? const Icon(Icons.check, size: 12, color: Colors.white)
-            : null,
-      ),
-    );
-
     final content = Container(
       height: height,
-      padding: const EdgeInsets.symmetric(horizontal: 6),
+      padding: titleMaxLines > 1
+          ? const EdgeInsets.symmetric(horizontal: 6, vertical: 2)
+          : const EdgeInsets.symmetric(horizontal: 6),
       decoration: BoxDecoration(
         color: blockBg,
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: blockBorder, width: 0.5),
       ),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
+        crossAxisAlignment: titleMaxLines > 1
+            ? CrossAxisAlignment.start
+            : CrossAxisAlignment.center,
         children: [
-          checkbox,
-          const SizedBox(width: 6),
+          if (showCheckbox) ...[
+            InkWell(
+              onTap: onToggle,
+              borderRadius: BorderRadius.circular(4),
+              child: Container(
+                width: 16,
+                height: 16,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: fg.withOpacity(0.9), width: 1.6),
+                  color: isDone ? AppColors.accentCool : Colors.transparent,
+                ),
+                child: isDone
+                    ? const Icon(Icons.check, size: 12, color: Colors.white)
+                    : null,
+              ),
+            ),
+            const SizedBox(width: 6),
+          ],
           Flexible(
             fit: FlexFit.loose,
             child: Text(
               title,
-              maxLines: 1,
+              maxLines: titleMaxLines,
+              softWrap: titleMaxLines > 1,
               overflow: TextOverflow.ellipsis,
               style: baseStyle,
             ),
@@ -2370,7 +2549,8 @@ bool _isSameDay(DateTime a, DateTime b) =>
 int? _parseTimeToMinutes(String value) {
   final trimmed = value.trim();
   if (trimmed.isEmpty) return null;
-  final parts = trimmed.split(':');
+  final timePart = trimmed.split('+').first.trim();
+  final parts = timePart.split(':');
   if (parts.length != 2) return null;
   final hour = int.tryParse(parts[0]);
   final minute = int.tryParse(parts[1]);
@@ -2382,7 +2562,23 @@ int? _parseTimeToMinutes(String value) {
 }
 
 int _parseEndMinutes(Task task, int startMinutes) {
-  final end = _parseTimeToMinutes(task.endTime);
-  if (end != null && end > startMinutes) return end;
+  final raw = task.endTime.trim();
+  if (raw.isEmpty) return (startMinutes + 30).clamp(0, 24 * 60);
+  final offsetDays = () {
+    final plusIndex = raw.lastIndexOf('+');
+    if (plusIndex <= 0) return 0;
+    final parsed = int.tryParse(raw.substring(plusIndex + 1).trim()) ?? 0;
+    return parsed < 0 ? 0 : parsed;
+  }();
+
+  if (offsetDays > 0) return 24 * 60;
+
+  final end = _parseTimeToMinutes(raw);
+  if (end != null) {
+    if (end > startMinutes) return end;
+    // Implicitly treat end <= start as next day.
+    if (end <= startMinutes) return 24 * 60;
+  }
+
   return (startMinutes + 30).clamp(0, 24 * 60);
 }

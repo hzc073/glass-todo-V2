@@ -1078,15 +1078,44 @@ List<double> _buildHourHeatmap(List<PomodoroSession> sessions,
 int _taskPlannedMinutes(Task task) {
   final start = _parseTimeToMinutes(task.startTime);
   if (start == null) return 0;
-  final end = _parseTimeToMinutes(task.endTime);
-  if (end != null && end > start) return end - start;
+  final endRaw = task.endTime.trim();
+  if (endRaw.isEmpty) {
+    return (start + 30).clamp(0, 24 * 60) - start;
+  }
+
+  final plusIndex = endRaw.lastIndexOf('+');
+  final hasExplicitOffset = plusIndex > 0;
+  final explicitOffset = hasExplicitOffset
+      ? (int.tryParse(endRaw.substring(plusIndex + 1).trim()) ?? 0)
+      : 0;
+  final timePart =
+      (hasExplicitOffset ? endRaw.substring(0, plusIndex) : endRaw).trim();
+  final end = _parseTimeToMinutes(timePart);
+  if (end == null) {
+    return (start + 30).clamp(0, 24 * 60) - start;
+  }
+
+  int endTotalMinutes;
+  if (timePart == '24:00') {
+    endTotalMinutes = 24 * 60;
+  } else if (explicitOffset > 0) {
+    endTotalMinutes = explicitOffset.clamp(0, 1) * 24 * 60 + end;
+  } else if (end <= start) {
+    endTotalMinutes = 24 * 60 + end;
+  } else {
+    endTotalMinutes = end;
+  }
+
+  final planned = endTotalMinutes - start;
+  if (planned > 0) return planned;
   return (start + 30).clamp(0, 24 * 60) - start;
 }
 
 int? _parseTimeToMinutes(String value) {
   final trimmed = value.trim();
   if (trimmed.isEmpty) return null;
-  final parts = trimmed.split(':');
+  final timePart = trimmed.split('+').first.trim();
+  final parts = timePart.split(':');
   if (parts.length != 2) return null;
   final hour = int.tryParse(parts[0]);
   final minute = int.tryParse(parts[1]);

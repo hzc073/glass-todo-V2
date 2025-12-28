@@ -37,6 +37,13 @@ class ApiClient {
   final String baseUrl;
   final AuthStore authStore;
 
+  static const Duration _defaultTimeout = Duration(seconds: 15);
+  static const Duration _uploadTimeout = Duration(seconds: 60);
+
+  Future<T> _withTimeout<T>(Future<T> future, {Duration? timeout}) {
+    return future.timeout(timeout ?? _defaultTimeout);
+  }
+
   Uri _uri(String path) {
     if (baseUrl.trim().isEmpty) {
       return Uri.base.resolve(path);
@@ -69,7 +76,7 @@ class ApiClient {
       headers['x-invite-code'] = inviteCode.trim();
     }
 
-    final res = await http.post(_uri('/api/login'), headers: headers);
+    final res = await _withTimeout(http.post(_uri('/api/login'), headers: headers));
     final json = _decode(res);
     if (res.statusCode >= 200 && res.statusCode < 300) {
       await authStore.setSession(username: username, token: token);
@@ -79,7 +86,7 @@ class ApiClient {
 
   // Legacy endpoints (v1)
   Future<Map<String, dynamic>> loadData() async {
-    final res = await http.get(_uri('/api/data'), headers: _headers());
+    final res = await _withTimeout(http.get(_uri('/api/data'), headers: _headers()));
     _throwIfError(res);
     return _decode(res);
   }
@@ -90,17 +97,17 @@ class ApiClient {
       'version': DateTime.now().millisecondsSinceEpoch,
       'force': true,
     };
-    final res = await http.post(
+    final res = await _withTimeout(http.post(
       _uri('/api/data'),
       headers: _headers(),
       body: jsonEncode(payload),
-    );
+    ));
     _throwIfError(res);
   }
 
   Future<HolidayCnYear> getHolidayCnYear(int year) async {
     final res =
-        await http.get(_uri('/api/holidays/$year'), headers: _headers());
+        await _withTimeout(http.get(_uri('/api/holidays/$year'), headers: _headers()));
     _throwIfError(res);
     final json = _decode(res);
     return HolidayCnYear.fromJson(json);
@@ -123,7 +130,7 @@ class ApiClient {
       params['updated_since'] = updatedSince.toString();
     }
     final uri = _uri('/api/v2/tasks').replace(queryParameters: params);
-    final res = await http.get(uri, headers: _headers());
+    final res = await _withTimeout(http.get(uri, headers: _headers()));
     _throwIfError(res);
     final json = _decode(res);
     final list = json['tasks'];
@@ -161,11 +168,11 @@ class ApiClient {
       'repeatRule': repeatRule,
       'status': status,
     };
-    final res = await http.post(
+    final res = await _withTimeout(http.post(
       _uri('/api/v2/tasks'),
       headers: _headers(),
       body: jsonEncode(payload),
-    );
+    ));
     _throwIfError(res);
     final json = _decode(res);
     return Task.fromJson(json['task'] as Map<String, dynamic>);
@@ -213,25 +220,27 @@ class ApiClient {
     } else if (deletedAt != null) {
       payload['deletedAt'] = deletedAt;
     }
-    final res = await http.patch(
+    final res = await _withTimeout(http.patch(
       _uri('/api/v2/tasks/$id'),
       headers: _headers(),
       body: jsonEncode(payload),
-    );
+    ));
     _throwIfError(res);
     final json = _decode(res);
     return Task.fromJson(json['task'] as Map<String, dynamic>);
   }
 
   Future<void> deleteTask(String id) async {
-    final res =
-        await http.delete(_uri('/api/v2/tasks/$id'), headers: _headers());
+    final res = await _withTimeout(
+      http.delete(_uri('/api/v2/tasks/$id'), headers: _headers()),
+    );
     _throwIfError(res);
   }
 
   Future<int> emptyTrash() async {
-    final res = await http.delete(_uri('/api/v2/tasks/trash/empty'),
-        headers: _headers());
+    final res = await _withTimeout(
+      http.delete(_uri('/api/v2/tasks/trash/empty'), headers: _headers()),
+    );
     _throwIfError(res);
     final json = _decode(res);
     final purged = json['purged'];
@@ -256,8 +265,9 @@ class ApiClient {
       ),
     );
 
-    final res = await request.send();
-    final body = await res.stream.bytesToString();
+    final res = await _withTimeout(request.send(), timeout: _uploadTimeout);
+    final body =
+        await _withTimeout(res.stream.bytesToString(), timeout: _uploadTimeout);
     if (res.statusCode == 401) {
       throw UnauthorizedException();
     }
@@ -278,7 +288,8 @@ class ApiClient {
 
   // Checklists
   Future<List<ChecklistList>> getChecklists() async {
-    final res = await http.get(_uri('/api/checklists'), headers: _headers());
+    final res =
+        await _withTimeout(http.get(_uri('/api/checklists'), headers: _headers()));
     _throwIfError(res);
     final json = _decode(res);
     final list = json['lists'];
@@ -293,25 +304,27 @@ class ApiClient {
 
   Future<ChecklistList> createChecklist({required String name}) async {
     final payload = {'name': name};
-    final res = await http.post(
+    final res = await _withTimeout(http.post(
       _uri('/api/checklists'),
       headers: _headers(),
       body: jsonEncode(payload),
-    );
+    ));
     _throwIfError(res);
     final json = _decode(res);
     return ChecklistList.fromJson(json['list'] as Map<String, dynamic>);
   }
 
   Future<void> deleteChecklist(int id) async {
-    final res =
-        await http.delete(_uri('/api/checklists/$id'), headers: _headers());
+    final res = await _withTimeout(
+      http.delete(_uri('/api/checklists/$id'), headers: _headers()),
+    );
     _throwIfError(res);
   }
 
   Future<List<ChecklistItem>> getChecklistItems(int listId) async {
-    final res = await http.get(_uri('/api/checklists/$listId/items'),
-        headers: _headers());
+    final res = await _withTimeout(
+      http.get(_uri('/api/checklists/$listId/items'), headers: _headers()),
+    );
     _throwIfError(res);
     final json = _decode(res);
     final list = json['items'];
@@ -329,11 +342,11 @@ class ApiClient {
     required String title,
   }) async {
     final payload = {'title': title};
-    final res = await http.post(
+    final res = await _withTimeout(http.post(
       _uri('/api/checklists/$listId/items'),
       headers: _headers(),
       body: jsonEncode(payload),
-    );
+    ));
     _throwIfError(res);
     final json = _decode(res);
     return ChecklistItem.fromJson(json['item'] as Map<String, dynamic>);
@@ -350,11 +363,11 @@ class ApiClient {
     if (title != null) payload['title'] = title;
     if (completed != null) payload['completed'] = completed;
     if (notes != null) payload['notes'] = notes;
-    final res = await http.patch(
+    final res = await _withTimeout(http.patch(
       _uri('/api/checklists/$listId/items/$itemId'),
       headers: _headers(),
       body: jsonEncode(payload),
-    );
+    ));
     _throwIfError(res);
     final json = _decode(res);
     return ChecklistItem.fromJson(json['item'] as Map<String, dynamic>);
@@ -364,8 +377,9 @@ class ApiClient {
     required int listId,
     required int itemId,
   }) async {
-    final res = await http.delete(_uri('/api/checklists/$listId/items/$itemId'),
-        headers: _headers());
+    final res = await _withTimeout(
+      http.delete(_uri('/api/checklists/$listId/items/$itemId'), headers: _headers()),
+    );
     _throwIfError(res);
   }
 
@@ -383,7 +397,7 @@ class ApiClient {
     }
     final uri =
         _uri('/api/v2/time/activities').replace(queryParameters: params);
-    final res = await http.get(uri, headers: _headers());
+    final res = await _withTimeout(http.get(uri, headers: _headers()));
     _throwIfError(res);
     final json = _decode(res);
     final list = json['activities'];
@@ -414,11 +428,11 @@ class ApiClient {
       if (goal != null && goal.isNotEmpty) 'goal': goal,
       if (note != null) 'note': note,
     };
-    final res = await http.post(
+    final res = await _withTimeout(http.post(
       _uri('/api/v2/time/activities'),
       headers: _headers(),
       body: jsonEncode(payload),
-    );
+    ));
     _throwIfError(res);
     final json = _decode(res);
     return TimeActivity.fromJson(json['activity'] as Map<String, dynamic>);
@@ -444,19 +458,20 @@ class ApiClient {
     if (goal != null) payload['goal'] = goal;
     if (note != null) payload['note'] = note;
     if (deletedAt != null) payload['deletedAt'] = deletedAt;
-    final res = await http.patch(
+    final res = await _withTimeout(http.patch(
       _uri('/api/v2/time/activities/$id'),
       headers: _headers(),
       body: jsonEncode(payload),
-    );
+    ));
     _throwIfError(res);
     final json = _decode(res);
     return TimeActivity.fromJson(json['activity'] as Map<String, dynamic>);
   }
 
   Future<void> deleteActivity(String id) async {
-    final res = await http.delete(_uri('/api/v2/time/activities/$id'),
-        headers: _headers());
+    final res = await _withTimeout(
+      http.delete(_uri('/api/v2/time/activities/$id'), headers: _headers()),
+    );
     _throwIfError(res);
   }
 
@@ -480,7 +495,7 @@ class ApiClient {
     if (taskId != null && taskId.isNotEmpty) params['task_id'] = taskId;
     if (runningOnly) params['running_only'] = 'true';
     final uri = _uri('/api/v2/time/entries').replace(queryParameters: params);
-    final res = await http.get(uri, headers: _headers());
+    final res = await _withTimeout(http.get(uri, headers: _headers()));
     _throwIfError(res);
     final json = _decode(res);
     final list = json['entries'];
@@ -494,8 +509,9 @@ class ApiClient {
   }
 
   Future<List<TimeEntry>> getRunningEntries() async {
-    final res = await http.get(_uri('/api/v2/time/entries/running'),
-        headers: _headers());
+    final res = await _withTimeout(
+      http.get(_uri('/api/v2/time/entries/running'), headers: _headers()),
+    );
     _throwIfError(res);
     final json = _decode(res);
     final list = json['entries'];
@@ -522,11 +538,11 @@ class ApiClient {
       if (note != null) 'note': note,
       if (tags != null) 'tags': tags,
     };
-    final res = await http.post(
+    final res = await _withTimeout(http.post(
       _uri('/api/v2/time/entries/start'),
       headers: _headers(),
       body: jsonEncode(payload),
-    );
+    ));
     _throwIfError(res);
     final json = _decode(res);
     return TimeEntry.fromJson(json['entry'] as Map<String, dynamic>);
@@ -535,11 +551,11 @@ class ApiClient {
   Future<TimeEntry> stopEntry(String id, {int? endedAt}) async {
     final payload = <String, dynamic>{};
     if (endedAt != null) payload['endedAt'] = endedAt;
-    final res = await http.post(
+    final res = await _withTimeout(http.post(
       _uri('/api/v2/time/entries/$id/stop'),
       headers: _headers(),
       body: jsonEncode(payload),
-    );
+    ));
     _throwIfError(res);
     final json = _decode(res);
     return TimeEntry.fromJson(json['entry'] as Map<String, dynamic>);
@@ -568,19 +584,20 @@ class ApiClient {
     if (note != null) payload['note'] = note;
     if (tags != null) payload['tags'] = tags;
     if (deletedAt != null) payload['deletedAt'] = deletedAt;
-    final res = await http.patch(
+    final res = await _withTimeout(http.patch(
       _uri('/api/v2/time/entries/$id'),
       headers: _headers(),
       body: jsonEncode(payload),
-    );
+    ));
     _throwIfError(res);
     final json = _decode(res);
     return TimeEntry.fromJson(json['entry'] as Map<String, dynamic>);
   }
 
   Future<void> deleteEntry(String id) async {
-    final res = await http.delete(_uri('/api/v2/time/entries/$id'),
-        headers: _headers());
+    final res = await _withTimeout(
+      http.delete(_uri('/api/v2/time/entries/$id'), headers: _headers()),
+    );
     _throwIfError(res);
   }
 
@@ -589,15 +606,16 @@ class ApiClient {
       'from': from.toString(),
       'to': to.toString(),
     });
-    final res = await http.get(uri, headers: _headers());
+    final res = await _withTimeout(http.get(uri, headers: _headers()));
     _throwIfError(res);
     final json = _decode(res);
     return TimeStats.fromJson(json);
   }
 
   Future<PomodoroSettings> getPomodoroSettings() async {
-    final res =
-        await http.get(_uri('/api/pomodoro/settings'), headers: _headers());
+    final res = await _withTimeout(
+      http.get(_uri('/api/pomodoro/settings'), headers: _headers()),
+    );
     _throwIfError(res);
     final json = _decode(res);
     final raw = json['settings'];
@@ -621,11 +639,11 @@ class ApiClient {
 
   Future<PomodoroSettings> savePomodoroSettings(
       PomodoroSettings settings) async {
-    final res = await http.post(
+    final res = await _withTimeout(http.post(
       _uri('/api/pomodoro/settings'),
       headers: _headers(),
       body: jsonEncode(settings.toJson()),
-    );
+    ));
     _throwIfError(res);
     final json = _decode(res);
     final raw = json['settings'];
@@ -639,8 +657,9 @@ class ApiClient {
   }
 
   Future<PomodoroState?> getPomodoroState() async {
-    final res =
-        await http.get(_uri('/api/pomodoro/state'), headers: _headers());
+    final res = await _withTimeout(
+      http.get(_uri('/api/pomodoro/state'), headers: _headers()),
+    );
     _throwIfError(res);
     final json = _decode(res);
     final raw = json['state'];
@@ -651,11 +670,11 @@ class ApiClient {
   }
 
   Future<void> savePomodoroState(PomodoroState state) async {
-    final res = await http.post(
+    final res = await _withTimeout(http.post(
       _uri('/api/pomodoro/state'),
       headers: _headers(),
       body: jsonEncode(state.toJson()),
-    );
+    ));
     _throwIfError(res);
   }
 
@@ -663,7 +682,7 @@ class ApiClient {
     final uri = _uri('/api/pomodoro/summary').replace(queryParameters: {
       'days': days.toString(),
     });
-    final res = await http.get(uri, headers: _headers());
+    final res = await _withTimeout(http.get(uri, headers: _headers()));
     _throwIfError(res);
     final json = _decode(res);
     return PomodoroSummary.fromJson(json);
@@ -673,7 +692,7 @@ class ApiClient {
     final uri = _uri('/api/pomodoro/sessions').replace(queryParameters: {
       'limit': limit.toString(),
     });
-    final res = await http.get(uri, headers: _headers());
+    final res = await _withTimeout(http.get(uri, headers: _headers()));
     _throwIfError(res);
     final json = _decode(res);
     final list = json['sessions'];
@@ -702,16 +721,18 @@ class ApiClient {
       'durationMin': durationMin,
       if (dateKey != null) 'dateKey': dateKey,
     };
-    final res = await http.post(
+    final res = await _withTimeout(http.post(
       _uri('/api/pomodoro/sessions'),
       headers: _headers(),
       body: jsonEncode(payload),
-    );
+    ));
     _throwIfError(res);
   }
 
   Future<UserSettings> getUserSettings() async {
-    final res = await http.get(_uri('/api/user/settings'), headers: _headers());
+    final res = await _withTimeout(
+      http.get(_uri('/api/user/settings'), headers: _headers()),
+    );
     _throwIfError(res);
     final json = _decode(res);
     final raw = json['settings'];
@@ -725,11 +746,11 @@ class ApiClient {
   }
 
   Future<UserSettings> saveUserSettings(UserSettings settings) async {
-    final res = await http.post(
+    final res = await _withTimeout(http.post(
       _uri('/api/user/settings'),
       headers: _headers(),
       body: jsonEncode({'settings': settings.toJson()}),
-    );
+    ));
     _throwIfError(res);
     final json = _decode(res);
     final raw = json['settings'];
@@ -746,14 +767,14 @@ class ApiClient {
     required String token,
     required String platform,
   }) async {
-    final res = await http.post(
+    final res = await _withTimeout(http.post(
       _uri('/api/fcm/register'),
       headers: _headers(),
       body: jsonEncode({
         'token': token,
         'platform': platform,
       }),
-    );
+    ));
     _throwIfError(res);
   }
 
@@ -762,20 +783,20 @@ class ApiClient {
     if (token != null && token.trim().isNotEmpty) {
       payload['token'] = token.trim();
     }
-    final res = await http.post(
+    final res = await _withTimeout(http.post(
       _uri('/api/fcm/unregister'),
       headers: _headers(),
       body: jsonEncode(payload),
-    );
+    ));
     _throwIfError(res);
   }
 
   Future<void> sendFcmTest() async {
-    final res = await http.post(
+    final res = await _withTimeout(http.post(
       _uri('/api/fcm/test'),
       headers: _headers(),
       body: jsonEncode({}),
-    );
+    ));
     _throwIfError(res);
   }
 
@@ -783,34 +804,39 @@ class ApiClient {
     required String oldPassword,
     required String newPassword,
   }) async {
-    final res = await http.post(
+    final res = await _withTimeout(http.post(
       _uri('/api/change-pwd'),
       headers: _headers(),
       body: jsonEncode({
         'oldPassword': oldPassword,
         'newPassword': newPassword,
       }),
-    );
+    ));
     _throwIfError(res);
   }
 
   Future<String> getInviteCode() async {
-    final res = await http.get(_uri('/api/admin/invite'), headers: _headers());
+    final res =
+        await _withTimeout(http.get(_uri('/api/admin/invite'), headers: _headers()));
     _throwIfError(res);
     final json = _decode(res);
     return (json['code'] ?? '').toString();
   }
 
   Future<String> refreshInviteCode() async {
-    final res = await http.post(_uri('/api/admin/invite/refresh'),
-        headers: _headers(), body: jsonEncode({}));
+    final res = await _withTimeout(http.post(
+      _uri('/api/admin/invite/refresh'),
+      headers: _headers(),
+      body: jsonEncode({}),
+    ));
     _throwIfError(res);
     final json = _decode(res);
     return (json['code'] ?? '').toString();
   }
 
   Future<Map<String, dynamic>> exportAllData() async {
-    final res = await http.get(_uri('/api/v2/export'), headers: _headers());
+    final res =
+        await _withTimeout(http.get(_uri('/api/v2/export'), headers: _headers()));
     _throwIfError(res);
     return _decode(res);
   }
@@ -819,20 +845,20 @@ class ApiClient {
     required String mode, // merge | overwrite
     required Map<String, dynamic> data,
   }) async {
-    final res = await http.post(
+    final res = await _withTimeout(http.post(
       _uri('/api/v2/import'),
       headers: _headers(),
       body: jsonEncode({'mode': mode, 'data': data}),
-    );
+    ));
     _throwIfError(res);
   }
 
   Future<int> cleanupCompletedTasks({required int retentionDays}) async {
-    final res = await http.post(
+    final res = await _withTimeout(http.post(
       _uri('/api/v2/tasks/completed/cleanup'),
       headers: _headers(),
       body: jsonEncode({'retentionDays': retentionDays}),
-    );
+    ));
     _throwIfError(res);
     final json = _decode(res);
     final purged = json['purged'];
@@ -842,11 +868,11 @@ class ApiClient {
   }
 
   Future<void> deleteAccountAndData() async {
-    final res = await http.post(
+    final res = await _withTimeout(http.post(
       _uri('/api/user/delete'),
       headers: _headers(),
       body: jsonEncode({'confirm': 'DELETE'}),
-    );
+    ));
     _throwIfError(res);
   }
 

@@ -38,6 +38,7 @@ class UserSettings {
         shortcutsEnabled: true,
         naturalLanguageEnabled: true,
         matrixScope: 'today',
+        calendarTimelineDefaultHour: 8,
       ),
       notifications: UserNotificationSettings(
         enabled: false,
@@ -189,6 +190,7 @@ class UserPreferenceSettings {
     required this.shortcutsEnabled,
     required this.naturalLanguageEnabled,
     required this.matrixScope,
+    required this.calendarTimelineDefaultHour,
   });
 
   final String defaultView;
@@ -200,6 +202,7 @@ class UserPreferenceSettings {
   final bool shortcutsEnabled;
   final bool naturalLanguageEnabled;
   final String matrixScope; // today/3days/all
+  final int calendarTimelineDefaultHour; // 0-23
 
   factory UserPreferenceSettings.fromJson(Map<String, dynamic> json,
       {required UserPreferenceSettings defaults}) {
@@ -218,6 +221,11 @@ class UserPreferenceSettings {
             : (legacyTodayOnly != null
                 ? (legacyTodayOnly ? 'today' : 'all')
                 : defaultScope);
+
+    final timelineHour =
+        _parseInt(json['calendarTimelineDefaultHour']) ??
+            defaults.calendarTimelineDefaultHour;
+    final safeTimelineHour = timelineHour.clamp(0, 23);
     return UserPreferenceSettings(
       defaultView: (json['defaultView'] ?? defaults.defaultView).toString(),
       undoEnabled: _parseBool(json['undoEnabled']) ?? defaults.undoEnabled,
@@ -230,6 +238,7 @@ class UserPreferenceSettings {
       naturalLanguageEnabled: _parseBool(json['naturalLanguageEnabled']) ??
           defaults.naturalLanguageEnabled,
       matrixScope: scope,
+      calendarTimelineDefaultHour: safeTimelineHour,
     );
   }
 
@@ -243,6 +252,7 @@ class UserPreferenceSettings {
         'shortcutsEnabled': shortcutsEnabled,
         'naturalLanguageEnabled': naturalLanguageEnabled,
         'matrixScope': matrixScope,
+        'calendarTimelineDefaultHour': calendarTimelineDefaultHour,
       };
 
   UserPreferenceSettings copyWith({
@@ -255,6 +265,7 @@ class UserPreferenceSettings {
     bool? shortcutsEnabled,
     bool? naturalLanguageEnabled,
     String? matrixScope,
+    int? calendarTimelineDefaultHour,
   }) {
     return UserPreferenceSettings(
       defaultView: defaultView ?? this.defaultView,
@@ -267,6 +278,9 @@ class UserPreferenceSettings {
       naturalLanguageEnabled:
           naturalLanguageEnabled ?? this.naturalLanguageEnabled,
       matrixScope: matrixScope ?? this.matrixScope,
+      calendarTimelineDefaultHour:
+          (calendarTimelineDefaultHour ?? this.calendarTimelineDefaultHour)
+              .clamp(0, 23),
     );
   }
 }

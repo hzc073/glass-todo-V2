@@ -50,6 +50,8 @@ class Task {
   List<String> get displayTags => Task.stripSystemTags(tags);
 
   factory Task.fromJson(Map<String, dynamic> json) {
+    final remindAt = _parseInt(json['remindAt'] ?? json['remind_at']);
+    final deletedAt = _parseInt(json['deletedAt'] ?? json['deleted_at']);
     return Task(
       id: (json['id'] ?? '').toString(),
       title: (json['title'] ?? '').toString(),
@@ -61,13 +63,13 @@ class Task {
       tags: _parseStringList(json['tags']),
       inbox: json['inbox'] == true || json['inbox'] == 1,
       priority: _parseInt(json['priority']) ?? 0,
-      remindAt: _parseInt(json['remindAt'] ?? json['remind_at']),
+      remindAt: remindAt == null || remindAt <= 0 ? null : remindAt,
       repeatRule: (json['repeatRule'] ?? json['repeat_rule'] ?? '').toString(),
       attachments: _parseAttachments(json['attachments']),
       subtasks: _parseSubtasks(json['subtasks']),
       createdAt: _parseInt(json['createdAt'] ?? json['created_at']) ?? 0,
       updatedAt: _parseInt(json['updatedAt'] ?? json['updated_at']) ?? 0,
-      deletedAt: _parseInt(json['deletedAt'] ?? json['deleted_at']),
+      deletedAt: deletedAt == null || deletedAt <= 0 ? null : deletedAt,
       owner: (json['owner'] ?? json['username'] ?? '').toString(),
     );
   }

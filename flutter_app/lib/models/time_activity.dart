@@ -26,6 +26,7 @@ class TimeActivity {
   final int? deletedAt;
 
   factory TimeActivity.fromJson(Map<String, dynamic> json) {
+    final deletedAt = _parseInt(json['deletedAt'] ?? json['deleted_at']);
     return TimeActivity(
       id: (json['id'] ?? '').toString(),
       name: (json['name'] ?? '').toString(),
@@ -37,7 +38,7 @@ class TimeActivity {
       note: (json['note'] ?? '').toString(),
       createdAt: _parseInt(json['createdAt'] ?? json['created_at']) ?? 0,
       updatedAt: _parseInt(json['updatedAt'] ?? json['updated_at']) ?? 0,
-      deletedAt: _parseInt(json['deletedAt'] ?? json['deleted_at']),
+      deletedAt: deletedAt == null || deletedAt <= 0 ? null : deletedAt,
     );
   }
 

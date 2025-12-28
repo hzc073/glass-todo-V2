@@ -16,11 +16,13 @@ class PomodoroSession {
   final int durationMin;
 
   factory PomodoroSession.fromJson(Map<String, dynamic> json) {
+    final taskId = _parseInt(json['taskId'] ?? json['task_id']);
+    final startedAt = _parseInt(json['startedAt'] ?? json['started_at']);
     return PomodoroSession(
       id: _parseInt(json['id']) ?? 0,
-      taskId: _parseInt(json['taskId'] ?? json['task_id']),
+      taskId: taskId == null || taskId <= 0 ? null : taskId,
       taskTitle: (json['taskTitle'] ?? json['task_title'])?.toString(),
-      startedAt: _parseInt(json['startedAt'] ?? json['started_at']),
+      startedAt: startedAt == null || startedAt <= 0 ? null : startedAt,
       endedAt: _parseInt(json['endedAt'] ?? json['ended_at']) ?? 0,
       durationMin: _parseInt(json['durationMin'] ?? json['duration_min']) ?? 0,
     );
@@ -33,4 +35,3 @@ int? _parseInt(dynamic value) {
   if (value is num) return value.toInt();
   return int.tryParse(value.toString());
 }
-

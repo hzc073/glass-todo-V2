@@ -33,7 +33,7 @@ class AppConfig {
       apiBaseUrl: rawApiBaseUrl.isEmpty ? defaultApiBaseUrl : rawApiBaseUrl,
       useLocalStorage: json['useLocalStorage'] == true,
       holidayJsonUrl: (json['holidayJsonUrl'] ?? '').toString().trim(),
-      appTitle: (json['appTitle'] ?? 'Glass Todo').toString(),
+      appTitle: (json['appTitle'] ?? 'Glass-ToDo').toString(),
     );
   }
 
@@ -54,7 +54,7 @@ class AppConfig {
       apiBaseUrl: defaultApiBaseUrl,
       useLocalStorage: false,
       holidayJsonUrl: '',
-      appTitle: 'Glass Todo',
+      appTitle: 'Glass-ToDo',
     );
   }
 }

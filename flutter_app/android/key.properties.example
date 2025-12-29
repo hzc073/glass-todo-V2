@@ -1,0 +1,8 @@
+# Rename this file to `key.properties` and fill in your passwords.
+# Keep `key.properties` and the keystore file out of git.
+
+storePassword=YOUR_STORE_PASSWORD
+keyPassword=YOUR_KEY_PASSWORD
+keyAlias=upload
+# Path to your keystore file (relative to `android/app`, or use an absolute path)
+storeFile=upload-keystore.jks

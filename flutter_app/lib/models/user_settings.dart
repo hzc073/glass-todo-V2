@@ -35,7 +35,10 @@ class UserSettings {
         defaultSort: 'manual',
         theme: 'system',
         weekStart: 'monday',
+        timeZoneOffsetMinutes: 480,
         shortcutsEnabled: true,
+        shortcutNewTask: 'n',
+        shortcutSearch: '/',
         naturalLanguageEnabled: true,
         matrixScope: 'today',
         calendarTimelineDefaultHour: 8,
@@ -187,7 +190,10 @@ class UserPreferenceSettings {
     required this.defaultSort,
     required this.theme,
     required this.weekStart,
+    required this.timeZoneOffsetMinutes,
     required this.shortcutsEnabled,
+    required this.shortcutNewTask,
+    required this.shortcutSearch,
     required this.naturalLanguageEnabled,
     required this.matrixScope,
     required this.calendarTimelineDefaultHour,
@@ -198,8 +204,11 @@ class UserPreferenceSettings {
   final int undoSeconds;
   final String defaultSort;
   final String theme; // light/dark/system
-  final String weekStart; // monday/sunday
+  final String weekStart; // monday..sunday
+  final int timeZoneOffsetMinutes; // minutes = local - utc
   final bool shortcutsEnabled;
+  final String shortcutNewTask;
+  final String shortcutSearch;
   final bool naturalLanguageEnabled;
   final String matrixScope; // today/3days/all
   final int calendarTimelineDefaultHour; // 0-23
@@ -226,6 +235,22 @@ class UserPreferenceSettings {
         _parseInt(json['calendarTimelineDefaultHour']) ??
             defaults.calendarTimelineDefaultHour;
     final safeTimelineHour = timelineHour.clamp(0, 23);
+
+    final tzOffset = _parseInt(json['timeZoneOffsetMinutes'] ??
+            json['tzOffsetMinutes'] ??
+            json['tz_offset_minutes']) ??
+        defaults.timeZoneOffsetMinutes;
+    final safeTzOffset = tzOffset.clamp(-14 * 60, 14 * 60).toInt();
+    String safeShortcut(dynamic value, String fallback) {
+      final raw = (value ?? fallback).toString().trim();
+      if (raw.isEmpty) return fallback;
+      return raw.length > 32 ? raw.substring(0, 32) : raw;
+    }
+
+    final shortcutNewTask =
+        safeShortcut(json['shortcutNewTask'], defaults.shortcutNewTask);
+    final shortcutSearch =
+        safeShortcut(json['shortcutSearch'], defaults.shortcutSearch);
     return UserPreferenceSettings(
       defaultView: (json['defaultView'] ?? defaults.defaultView).toString(),
       undoEnabled: _parseBool(json['undoEnabled']) ?? defaults.undoEnabled,
@@ -233,8 +258,11 @@ class UserPreferenceSettings {
       defaultSort: (json['defaultSort'] ?? defaults.defaultSort).toString(),
       theme: (json['theme'] ?? defaults.theme).toString(),
       weekStart: (json['weekStart'] ?? defaults.weekStart).toString(),
+      timeZoneOffsetMinutes: safeTzOffset,
       shortcutsEnabled:
           _parseBool(json['shortcutsEnabled']) ?? defaults.shortcutsEnabled,
+      shortcutNewTask: shortcutNewTask,
+      shortcutSearch: shortcutSearch,
       naturalLanguageEnabled: _parseBool(json['naturalLanguageEnabled']) ??
           defaults.naturalLanguageEnabled,
       matrixScope: scope,
@@ -249,7 +277,10 @@ class UserPreferenceSettings {
         'defaultSort': defaultSort,
         'theme': theme,
         'weekStart': weekStart,
+        'timeZoneOffsetMinutes': timeZoneOffsetMinutes,
         'shortcutsEnabled': shortcutsEnabled,
+        'shortcutNewTask': shortcutNewTask,
+        'shortcutSearch': shortcutSearch,
         'naturalLanguageEnabled': naturalLanguageEnabled,
         'matrixScope': matrixScope,
         'calendarTimelineDefaultHour': calendarTimelineDefaultHour,
@@ -262,7 +293,10 @@ class UserPreferenceSettings {
     String? defaultSort,
     String? theme,
     String? weekStart,
+    int? timeZoneOffsetMinutes,
     bool? shortcutsEnabled,
+    String? shortcutNewTask,
+    String? shortcutSearch,
     bool? naturalLanguageEnabled,
     String? matrixScope,
     int? calendarTimelineDefaultHour,
@@ -274,7 +308,13 @@ class UserPreferenceSettings {
       defaultSort: defaultSort ?? this.defaultSort,
       theme: theme ?? this.theme,
       weekStart: weekStart ?? this.weekStart,
+      timeZoneOffsetMinutes:
+          (timeZoneOffsetMinutes ?? this.timeZoneOffsetMinutes)
+              .clamp(-14 * 60, 14 * 60)
+              .toInt(),
       shortcutsEnabled: shortcutsEnabled ?? this.shortcutsEnabled,
+      shortcutNewTask: shortcutNewTask ?? this.shortcutNewTask,
+      shortcutSearch: shortcutSearch ?? this.shortcutSearch,
       naturalLanguageEnabled:
           naturalLanguageEnabled ?? this.naturalLanguageEnabled,
       matrixScope: matrixScope ?? this.matrixScope,

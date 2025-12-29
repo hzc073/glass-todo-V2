@@ -50,8 +50,14 @@ class _StatsDashboardViewState extends State<StatsDashboardView> {
     final dateKeyFmt = DateFormat('yyyy-MM-dd');
 
     final yesterdayKey = dateKeyFmt.format(yesterday);
-    final utcYesterdayKey = dateKeyFmt
-        .format(DateTime.now().toUtc().subtract(const Duration(days: 1)));
+    final tzOffsetMinutes =
+        timeStats?.tzOffsetMinutes ?? DateTime.now().timeZoneOffset.inMinutes;
+    final offsetMs = tzOffsetMinutes * 60 * 1000;
+    final localNow =
+        DateTime.fromMillisecondsSinceEpoch(now.millisecondsSinceEpoch + offsetMs, isUtc: true);
+    final localTodayStart = DateTime.utc(localNow.year, localNow.month, localNow.day);
+    final yesterdayEventKey =
+        dateKeyFmt.format(localTodayStart.subtract(const Duration(days: 1)));
 
     final allTasks = tasks.where((task) => task.deletedAt == null).toList();
     final tasksByDayKey = <String, List<Task>>{};
@@ -86,7 +92,7 @@ class _StatsDashboardViewState extends State<StatsDashboardView> {
         pomodoroSummary?.days[yesterdayKey]?.workMinutes ?? 0;
     final yesterdayHeat = _buildHourHeatmap(pomodoroSessions, day: yesterday);
 
-    final yesterdayEventMs = timeStats?.byDay[utcYesterdayKey] ?? 0;
+    final yesterdayEventMs = timeStats?.byDay[yesterdayEventKey] ?? 0;
 
     final dueLast7Keys = last7Days.map(dateKeyFmt.format).toSet();
     final tasksLast7 = [

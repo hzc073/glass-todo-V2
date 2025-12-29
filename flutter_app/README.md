@@ -1,6 +1,8 @@
-# glass_todo_flutter
+# Glass-ToDo
 
-A new Flutter project.
+![Glass-ToDo logo](../logo.png)
+
+Glass-ToDo 的 Flutter 客户端（Web / Android）。
 
 ## Getting Started
 

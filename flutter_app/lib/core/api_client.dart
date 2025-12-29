@@ -13,7 +13,9 @@ import '../models/pomodoro_summary.dart';
 import '../models/task.dart';
 import '../models/time_activity.dart';
 import '../models/time_entry.dart';
+import '../models/time_goals.dart';
 import '../models/time_stats.dart';
+import '../models/time_stats_detail.dart';
 import '../models/user_settings.dart';
 import 'auth_store.dart';
 
@@ -288,6 +290,18 @@ class ApiClient {
       throw ApiException(res.statusCode, body);
     }
     return TaskAttachment.fromJson(attachment);
+  }
+
+  Future<Uint8List> downloadAttachmentBytes(String attachmentId) async {
+    final res = await _withTimeout(
+      http.get(
+        _uri('/api/attachments/$attachmentId/download'),
+        headers: _headers(json: false),
+      ),
+      timeout: _uploadTimeout,
+    );
+    _throwIfError(res);
+    return res.bodyBytes;
   }
 
   // Checklists
@@ -616,15 +630,73 @@ class ApiClient {
     _throwIfError(res);
   }
 
-  Future<TimeStats> getTimeStats({required int from, required int to}) async {
+  Future<TimeStats> getTimeStats({
+    required int from,
+    required int to,
+    int? tzOffsetMinutes,
+  }) async {
+    final offset = tzOffsetMinutes ?? DateTime.now().timeZoneOffset.inMinutes;
     final uri = _uri('/api/v2/time/stats').replace(queryParameters: {
       'from': from.toString(),
       'to': to.toString(),
+      'tzOffsetMinutes': offset.toString(),
     });
     final res = await _withTimeout(http.get(uri, headers: _headers()));
     _throwIfError(res);
     final json = _decode(res);
     return TimeStats.fromJson(json);
+  }
+
+  Future<TimeStatsDetail> getTimeStatsDetail({
+    required int from,
+    required int to,
+    required String type,
+    required String id,
+    int? tzOffsetMinutes,
+  }) async {
+    final offset = tzOffsetMinutes ?? DateTime.now().timeZoneOffset.inMinutes;
+    final uri = _uri('/api/v2/time/stats/detail').replace(queryParameters: {
+      'from': from.toString(),
+      'to': to.toString(),
+      'tzOffsetMinutes': offset.toString(),
+      'type': type,
+      'id': id,
+    });
+    final res = await _withTimeout(http.get(uri, headers: _headers()));
+    _throwIfError(res);
+    final json = _decode(res);
+    return TimeStatsDetail.fromJson(json);
+  }
+
+  Future<TimeGoalsSnapshot> getTimeGoals({int? tzOffsetMinutes}) async {
+    final offset = tzOffsetMinutes ?? DateTime.now().timeZoneOffset.inMinutes;
+    final uri = _uri('/api/v2/time/goals').replace(queryParameters: {
+      'tzOffsetMinutes': offset.toString(),
+    });
+    final res = await _withTimeout(http.get(uri, headers: _headers()));
+    _throwIfError(res);
+    final json = _decode(res);
+    return TimeGoalsSnapshot.fromJson(json);
+  }
+
+  Future<void> saveTimeGoal({
+    required String activityId,
+    required TimeGoalPeriods targets,
+  }) async {
+    final res = await _withTimeout(http.put(
+      _uri('/api/v2/time/goals/$activityId'),
+      headers: _headers(),
+      body: jsonEncode({'targets': targets.toJson()}),
+    ));
+    _throwIfError(res);
+  }
+
+  Future<void> deleteTimeGoal(String activityId) async {
+    final res = await _withTimeout(http.delete(
+      _uri('/api/v2/time/goals/$activityId'),
+      headers: _headers(),
+    ));
+    _throwIfError(res);
   }
 
   Future<PomodoroSettings> getPomodoroSettings() async {

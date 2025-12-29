@@ -14,6 +14,7 @@ class DesktopShell extends StatefulWidget {
     required this.username,
     required this.apiClient,
     required this.userSettings,
+    required this.timeTrackingOngoingNotificationEnabled,
     required this.onLogout,
     required this.onOpenSettings,
     required this.initialWorkspace,
@@ -23,6 +24,7 @@ class DesktopShell extends StatefulWidget {
   final String username;
   final ApiClient apiClient;
   final UserSettings userSettings;
+  final bool timeTrackingOngoingNotificationEnabled;
   final VoidCallback onLogout;
   final VoidCallback onOpenSettings;
   final WorkspaceView initialWorkspace;
@@ -80,6 +82,8 @@ class _DesktopShellState extends State<DesktopShell> {
                     username: widget.username,
                     apiClient: widget.apiClient,
                     userSettings: widget.userSettings,
+                    timeTrackingOngoingNotificationEnabled:
+                        widget.timeTrackingOngoingNotificationEnabled,
                     onLogout: widget.onLogout,
                     onOpenSettings: widget.onOpenSettings,
                     workspace: _workspace,

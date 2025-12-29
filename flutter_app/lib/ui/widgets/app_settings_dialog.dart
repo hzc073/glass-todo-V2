@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../core/api_client.dart';
+import '../../core/app_version.dart';
+import '../../core/keyboard_shortcuts.dart';
 import '../../core/notifications/fcm_notification_controller.dart';
 import '../../core/notifications/firebase_bootstrap.dart';
 import '../../core/notifications/local_task_notifications.dart';
@@ -17,6 +19,7 @@ enum AppSettingsSection {
   notifications,
   data,
   advanced,
+  about,
 }
 
 Future<void> showAppSettingsDialog(
@@ -24,6 +27,9 @@ Future<void> showAppSettingsDialog(
   required ApiClient apiClient,
   required String username,
   required UserSettings initialSettings,
+  required bool timeTrackingOngoingNotificationEnabled,
+  required Future<void> Function(bool enabled)
+      onTimeTrackingOngoingNotificationEnabledChanged,
   required VoidCallback onLogout,
   required ValueChanged<UserSettings> onSettingsApplied,
   required ValueChanged<ThemeMode> onThemeModeChanged,
@@ -40,6 +46,10 @@ Future<void> showAppSettingsDialog(
       apiClient: apiClient,
       username: username,
       initialSettings: initialSettings,
+      timeTrackingOngoingNotificationEnabled:
+          timeTrackingOngoingNotificationEnabled,
+      onTimeTrackingOngoingNotificationEnabledChanged:
+          onTimeTrackingOngoingNotificationEnabledChanged,
       onLogout: onLogout,
       onSettingsApplied: onSettingsApplied,
       onThemeModeChanged: onThemeModeChanged,
@@ -57,6 +67,8 @@ class _AppSettingsDialog extends StatefulWidget {
     required this.apiClient,
     required this.username,
     required this.initialSettings,
+    required this.timeTrackingOngoingNotificationEnabled,
+    required this.onTimeTrackingOngoingNotificationEnabledChanged,
     required this.onLogout,
     required this.onSettingsApplied,
     required this.onThemeModeChanged,
@@ -70,6 +82,9 @@ class _AppSettingsDialog extends StatefulWidget {
   final ApiClient apiClient;
   final String username;
   final UserSettings initialSettings;
+  final bool timeTrackingOngoingNotificationEnabled;
+  final Future<void> Function(bool enabled)
+      onTimeTrackingOngoingNotificationEnabledChanged;
   final VoidCallback onLogout;
   final ValueChanged<UserSettings> onSettingsApplied;
   final ValueChanged<ThemeMode> onThemeModeChanged;
@@ -90,6 +105,7 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
   late final TextEditingController _nicknameController;
   late final TextEditingController _avatarController;
   late final TextEditingController _backupPathController;
+  late bool _timeTrackingOngoingNotificationEnabled;
 
   bool _loading = false;
   bool _saving = false;
@@ -103,10 +119,70 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
   bool _sendingFcmTest = false;
   bool _sendingLocalTest = false;
 
+  bool get _showDevOptions => !kReleaseMode;
+
+  Future<String?> _promptShortcut(
+    BuildContext context, {
+    required String title,
+    required String currentValue,
+  }) async {
+    String? captured;
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: Text(title),
+          content: Focus(
+            autofocus: true,
+            onKeyEvent: (node, event) {
+              if (event is! KeyDownEvent) return KeyEventResult.ignored;
+              if (event.logicalKey == LogicalKeyboardKey.escape) {
+                Navigator.of(context).pop();
+                return KeyEventResult.handled;
+              }
+              final value = shortcutStringFromKeyEvent(event);
+              if (value == null) return KeyEventResult.ignored;
+              setState(() => captured = value);
+              return KeyEventResult.handled;
+            },
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('请按下你想使用的快捷键组合（按 Esc 取消）。'),
+                const SizedBox(height: 12),
+                Text('当前：${shortcutDisplayLabel(currentValue)}'),
+                const SizedBox(height: 8),
+                Text(
+                  '新快捷键：${captured == null ? '（等待输入）' : shortcutDisplayLabel(captured!)}',
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('取消'),
+            ),
+            ElevatedButton(
+              onPressed: captured == null
+                  ? null
+                  : () => Navigator.of(context).pop(captured),
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    return result?.trim().isEmpty == true ? null : result;
+  }
+
   @override
   void initState() {
     super.initState();
     _settings = widget.initialSettings;
+    _timeTrackingOngoingNotificationEnabled =
+        widget.timeTrackingOngoingNotificationEnabled;
     _nicknameController =
         TextEditingController(text: _settings.profile.nickname);
     _avatarController = TextEditingController(text: _settings.profile.avatar);
@@ -319,6 +395,8 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
               icon: Icon(Icons.storage), label: Text('数据管理')),
           NavigationRailDestination(
               icon: Icon(Icons.auto_fix_high), label: Text('高级')),
+          NavigationRailDestination(
+              icon: Icon(Icons.info_outline), label: Text('关于')),
         ],
       ),
     );
@@ -336,6 +414,7 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
             value: AppSettingsSection.notifications, child: Text('通知设置')),
         DropdownMenuItem(value: AppSettingsSection.data, child: Text('数据管理')),
         DropdownMenuItem(value: AppSettingsSection.advanced, child: Text('高级')),
+        DropdownMenuItem(value: AppSettingsSection.about, child: Text('关于')),
       ],
       onChanged: (value) => setState(() => _section = value ?? _section),
     );
@@ -353,6 +432,8 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
         return _buildDataSection(context);
       case AppSettingsSection.advanced:
         return _buildAdvancedSection(context);
+      case AppSettingsSection.about:
+        return _buildAboutSection(context);
     }
   }
 
@@ -494,6 +575,15 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
 
   Widget _buildPreferencesSection(BuildContext context) {
     final prefs = _settings.preferences;
+    final defaultSort = prefs.defaultSort.trim();
+    final safeDefaultSort = <String>{
+      'manual',
+      'due',
+      'created',
+      if (_showDevOptions) 'quadrant',
+    }.contains(defaultSort)
+        ? defaultSort
+        : 'manual';
     final calendar = _settings.calendarSettings;
     return ListView(
       children: [
@@ -511,8 +601,8 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
           items: const [
             DropdownMenuItem(value: 'inbox', child: Text('收件箱')),
             DropdownMenuItem(value: 'today', child: Text('今天')),
-            DropdownMenuItem(value: 'checklists', child: Text('清单（开发中）')),
-            DropdownMenuItem(value: 'matrix', child: Text('看板/四象限（开发中）')),
+            DropdownMenuItem(value: 'checklists', child: Text('清单')),
+            DropdownMenuItem(value: 'matrix', child: Text('四象限')),
             DropdownMenuItem(value: 'calendar', child: Text('日历视图')),
             DropdownMenuItem(value: 'timeTracking', child: Text('时间记录')),
             DropdownMenuItem(value: 'pomodoro', child: Text('番茄钟')),
@@ -548,18 +638,19 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
         ),
         const SizedBox(height: 12),
         DropdownButtonFormField<String>(
-          value: prefs.defaultSort,
+          value: safeDefaultSort,
           decoration: const InputDecoration(labelText: '默认排序'),
-          items: const [
-            DropdownMenuItem(value: 'manual', child: Text('手动拖拽')),
-            DropdownMenuItem(value: 'quadrant', child: Text('按四象限（开发中）')),
-            DropdownMenuItem(value: 'due', child: Text('按截止日期')),
-            DropdownMenuItem(value: 'created', child: Text('按创建时间')),
+          items: [
+            const DropdownMenuItem(value: 'manual', child: Text('手动拖拽')),
+            if (_showDevOptions)
+              const DropdownMenuItem(value: 'quadrant', child: Text('按四象限')),
+            const DropdownMenuItem(value: 'due', child: Text('按截止日期')),
+            const DropdownMenuItem(value: 'created', child: Text('按创建时间')),
           ],
           onChanged: (value) {
             _updateSettings(_settings.copyWith(
                 preferences:
-                    prefs.copyWith(defaultSort: value ?? prefs.defaultSort)));
+                    prefs.copyWith(defaultSort: value ?? safeDefaultSort)));
           },
         ),
         const SizedBox(height: 12),
@@ -579,11 +670,34 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
           },
         ),
         const SizedBox(height: 12),
+        DropdownButtonFormField<int>(
+          value: prefs.timeZoneOffsetMinutes,
+          decoration: const InputDecoration(labelText: '时区（UTC 偏移）'),
+          items: [
+            for (var hour = -12; hour <= 14; hour++)
+              DropdownMenuItem(
+                value: hour * 60,
+                child: Text(_formatUtcOffsetMinutes(hour * 60)),
+              ),
+          ],
+          onChanged: (value) {
+            _updateSettings(_settings.copyWith(
+                preferences: prefs.copyWith(
+                    timeZoneOffsetMinutes:
+                        value ?? prefs.timeZoneOffsetMinutes)));
+          },
+        ),
+        const SizedBox(height: 12),
         DropdownButtonFormField<String>(
           value: prefs.weekStart,
           decoration: const InputDecoration(labelText: '星期起始日'),
           items: const [
             DropdownMenuItem(value: 'monday', child: Text('周一')),
+            DropdownMenuItem(value: 'tuesday', child: Text('周二')),
+            DropdownMenuItem(value: 'wednesday', child: Text('周三')),
+            DropdownMenuItem(value: 'thursday', child: Text('周四')),
+            DropdownMenuItem(value: 'friday', child: Text('周五')),
+            DropdownMenuItem(value: 'saturday', child: Text('周六')),
             DropdownMenuItem(value: 'sunday', child: Text('周日')),
           ],
           onChanged: (value) {
@@ -593,24 +707,99 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
           },
         ),
         const SizedBox(height: 12),
+        Text(
+          '快捷键',
+          style: Theme.of(context)
+              .textTheme
+              .titleSmall
+              ?.copyWith(fontWeight: FontWeight.w800),
+        ),
+        const SizedBox(height: 6),
         SwitchListTile(
           contentPadding: EdgeInsets.zero,
           value: prefs.shortcutsEnabled,
           onChanged: (v) => _updateSettings(_settings.copyWith(
               preferences: prefs.copyWith(shortcutsEnabled: v))),
           title: const Text('启用快捷键'),
-          subtitle: const Text('N 新建，/ 搜索，G 跳转，Ctrl+Enter 完成（逐步支持）'),
+          subtitle: const Text('可自定义：新建任务、搜索任务（桌面/Web 推荐）'),
         ),
-        const SizedBox(height: 8),
-        SwitchListTile(
+        const SizedBox(height: 6),
+        ListTile(
           contentPadding: EdgeInsets.zero,
-          value: prefs.naturalLanguageEnabled,
-          onChanged: (v) => _updateSettings(_settings.copyWith(
-              preferences: prefs.copyWith(naturalLanguageEnabled: v))),
-          title: const Text('允许自然语言解析'),
-          subtitle: const Text('例如：明天 9点 开会 #工作 !高（开发中）'),
+          title: const Text('新建任务'),
+          subtitle: const Text('聚焦顶部快速添加输入框'),
+          trailing: OutlinedButton(
+            onPressed: _saving
+                ? null
+                : () async {
+                    final next = await _promptShortcut(
+                      context,
+                      title: '设置「新建任务」快捷键',
+                      currentValue: prefs.shortcutNewTask,
+                    );
+                    if (!mounted || next == null) return;
+                    final nextNormalized =
+                        normalizeShortcutString(next).toLowerCase();
+                    final otherNormalized =
+                        normalizeShortcutString(prefs.shortcutSearch)
+                            .toLowerCase();
+                    if (nextNormalized.isNotEmpty &&
+                        nextNormalized == otherNormalized) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('快捷键冲突：已被「搜索任务」使用')),
+                      );
+                      return;
+                    }
+                    _updateSettings(_settings.copyWith(
+                        preferences: prefs.copyWith(shortcutNewTask: next)));
+                  },
+            child: Text(shortcutDisplayLabel(prefs.shortcutNewTask)),
+          ),
         ),
-        const SizedBox(height: 8),
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('搜索任务'),
+          subtitle: const Text('聚焦顶部搜索框'),
+          trailing: OutlinedButton(
+            onPressed: _saving
+                ? null
+                : () async {
+                    final next = await _promptShortcut(
+                      context,
+                      title: '设置「搜索任务」快捷键',
+                      currentValue: prefs.shortcutSearch,
+                    );
+                    if (!mounted || next == null) return;
+                    final nextNormalized =
+                        normalizeShortcutString(next).toLowerCase();
+                    final otherNormalized =
+                        normalizeShortcutString(prefs.shortcutNewTask)
+                            .toLowerCase();
+                    if (nextNormalized.isNotEmpty &&
+                        nextNormalized == otherNormalized) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('快捷键冲突：已被「新建任务」使用')),
+                      );
+                      return;
+                    }
+                    _updateSettings(_settings.copyWith(
+                        preferences: prefs.copyWith(shortcutSearch: next)));
+                  },
+            child: Text(shortcutDisplayLabel(prefs.shortcutSearch)),
+          ),
+        ),
+        if (_showDevOptions) ...[
+          const SizedBox(height: 8),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            value: prefs.naturalLanguageEnabled,
+            onChanged: (v) => _updateSettings(_settings.copyWith(
+                preferences: prefs.copyWith(naturalLanguageEnabled: v))),
+            title: const Text('允许自然语言解析'),
+            subtitle: const Text('例如：明天 9点 开会 #工作 !高（开发中）'),
+          ),
+          const SizedBox(height: 8),
+        ],
         DropdownButtonFormField<String>(
           value: prefs.matrixScope,
           decoration: const InputDecoration(labelText: '四象限范围'),
@@ -804,8 +993,54 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
               : null,
           title: const Text('计划开始提醒'),
         ),
-        const SizedBox(height: 12),
-        OutlinedButton.icon(
+        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) ...[
+          const SizedBox(height: 12),
+          Text(
+            '计时通知',
+            style: Theme.of(context)
+                .textTheme
+                .titleSmall
+                ?.copyWith(fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 8),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            value: _timeTrackingOngoingNotificationEnabled,
+            onChanged: _saving
+                ? null
+                : (v) async {
+                    if (v) {
+                      final granted = await LocalTaskNotifications.instance
+                          .requestPermission();
+                      if (!mounted) return;
+                      if (!granted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('系统未授予通知权限')),
+                        );
+                        return;
+                      }
+                    }
+                    setState(() => _timeTrackingOngoingNotificationEnabled = v);
+                    try {
+                      await widget
+                          .onTimeTrackingOngoingNotificationEnabledChanged(v);
+                    } catch (_) {
+                      if (!mounted) return;
+                      setState(() => _timeTrackingOngoingNotificationEnabled =
+                          !v);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('保存失败')),
+                      );
+                    }
+                  },
+            title: const Text('通知栏显示进行中活动'),
+            subtitle:
+                const Text('显示活动名称、开始时间与计时器，并提供停止/切换活动操作。'),
+          ),
+        ],
+        if (_showDevOptions) const SizedBox(height: 12),
+        if (_showDevOptions)
+          OutlinedButton.icon(
           onPressed: n.enabled && !_sendingLocalTest
               ? () async {
                   setState(() => _sendingLocalTest = true);
@@ -828,8 +1063,9 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
           icon: const Icon(Icons.notifications),
           label: Text(_sendingLocalTest ? '发送中…' : '测试本地通知'),
         ),
-        const SizedBox(height: 8),
-        OutlinedButton.icon(
+        if (_showDevOptions) const SizedBox(height: 8),
+        if (_showDevOptions)
+          OutlinedButton.icon(
           onPressed: n.enabled && !_sendingFcmTest
               ? () async {
                   setState(() => _sendingFcmTest = true);
@@ -958,124 +1194,126 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
             ),
           ],
         ),
-        const SizedBox(height: 18),
-        Text(
-          '自动备份',
-          style: Theme.of(context)
-              .textTheme
-              .titleSmall
-              ?.copyWith(fontWeight: FontWeight.w800),
-        ),
-        const SizedBox(height: 6),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          value: backup.enabled,
-          onChanged: (v) => _updateSettings(_settings.copyWith(
-              data: data.copyWith(backup: backup.copyWith(enabled: v)))),
-          title: const Text('开启自动备份（开发中）'),
-        ),
-        const SizedBox(height: 8),
-        DropdownButtonFormField<String>(
-          value: backup.frequency,
-          decoration: const InputDecoration(labelText: '频率'),
-          items: const [
-            DropdownMenuItem(value: 'daily', child: Text('每日')),
-            DropdownMenuItem(value: 'weekly', child: Text('每周')),
-          ],
-          onChanged: backup.enabled
-              ? (value) => _updateSettings(
-                    _settings.copyWith(
-                        data: data.copyWith(
-                            backup: backup.copyWith(
-                                frequency: value ?? backup.frequency))),
-                  )
-              : null,
-        ),
-        const SizedBox(height: 8),
-        DropdownButtonFormField<int>(
-          value: backup.keep,
-          decoration: const InputDecoration(labelText: '保留最近 N 份'),
-          items: const [
-            DropdownMenuItem(value: 5, child: Text('5 份')),
-            DropdownMenuItem(value: 10, child: Text('10 份')),
-            DropdownMenuItem(value: 20, child: Text('20 份')),
-            DropdownMenuItem(value: 30, child: Text('30 份')),
-          ],
-          onChanged: backup.enabled
-              ? (value) => _updateSettings(
-                    _settings.copyWith(
-                        data: data.copyWith(
-                            backup:
-                                backup.copyWith(keep: value ?? backup.keep))),
-                  )
-              : null,
-        ),
-        const SizedBox(height: 8),
-        DropdownButtonFormField<String>(
-          value: backup.location,
-          decoration: const InputDecoration(labelText: '备份位置'),
-          items: const [
-            DropdownMenuItem(value: 'local', child: Text('本地')),
-            DropdownMenuItem(value: 'server', child: Text('服务器路径（自部署）')),
-          ],
-          onChanged: backup.enabled
-              ? (value) => _updateSettings(
-                    _settings.copyWith(
-                        data: data.copyWith(
-                            backup: backup.copyWith(
-                                location: value ?? backup.location))),
-                  )
-              : null,
-        ),
-        const SizedBox(height: 8),
-        TextField(
-          controller: _backupPathController,
-          decoration: const InputDecoration(
-            labelText: '服务器备份路径',
-            hintText: '例如 /data/backups',
+        if (_showDevOptions) ...[
+          const SizedBox(height: 18),
+          Text(
+            '自动备份',
+            style: Theme.of(context)
+                .textTheme
+                .titleSmall
+                ?.copyWith(fontWeight: FontWeight.w800),
           ),
-          onChanged: backup.enabled
-              ? (value) => _updateSettings(_settings.copyWith(
-                  data: data.copyWith(
-                      backup: backup.copyWith(serverPath: value))))
-              : null,
-        ),
-        const SizedBox(height: 18),
-        Text(
-          '同步',
-          style: Theme.of(context)
-              .textTheme
-              .titleSmall
-              ?.copyWith(fontWeight: FontWeight.w800),
-        ),
-        const SizedBox(height: 8),
-        DropdownButtonFormField<String>(
-          value: sync.mode,
-          decoration: const InputDecoration(labelText: '同步开关'),
-          items: const [
-            DropdownMenuItem(value: 'local', child: Text('仅本地（开发中）')),
-            DropdownMenuItem(value: 'server', child: Text('与服务器同步')),
-          ],
-          onChanged: (value) => _updateSettings(_settings.copyWith(
-              data: data.copyWith(
-                  sync: sync.copyWith(mode: value ?? sync.mode)))),
-        ),
-        const SizedBox(height: 8),
-        DropdownButtonFormField<String>(
-          value: sync.conflictStrategy,
-          decoration: const InputDecoration(labelText: '冲突策略（开发中）'),
-          items: const [
-            DropdownMenuItem(value: 'latest', child: Text('以最新为准')),
-            DropdownMenuItem(value: 'manual', child: Text('手动选择')),
-            DropdownMenuItem(value: 'duplicate', child: Text('保留两份')),
-          ],
-          onChanged: (value) => _updateSettings(
-            _settings.copyWith(
+          const SizedBox(height: 6),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            value: backup.enabled,
+            onChanged: (v) => _updateSettings(_settings.copyWith(
+                data: data.copyWith(backup: backup.copyWith(enabled: v)))),
+            title: const Text('开启自动备份（开发中）'),
+          ),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<String>(
+            value: backup.frequency,
+            decoration: const InputDecoration(labelText: '频率'),
+            items: const [
+              DropdownMenuItem(value: 'daily', child: Text('每日')),
+              DropdownMenuItem(value: 'weekly', child: Text('每周')),
+            ],
+            onChanged: backup.enabled
+                ? (value) => _updateSettings(
+                      _settings.copyWith(
+                          data: data.copyWith(
+                              backup: backup.copyWith(
+                                  frequency: value ?? backup.frequency))),
+                    )
+                : null,
+          ),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<int>(
+            value: backup.keep,
+            decoration: const InputDecoration(labelText: '保留最近 N 份'),
+            items: const [
+              DropdownMenuItem(value: 5, child: Text('5 份')),
+              DropdownMenuItem(value: 10, child: Text('10 份')),
+              DropdownMenuItem(value: 20, child: Text('20 份')),
+              DropdownMenuItem(value: 30, child: Text('30 份')),
+            ],
+            onChanged: backup.enabled
+                ? (value) => _updateSettings(
+                      _settings.copyWith(
+                          data: data.copyWith(
+                              backup: backup.copyWith(
+                                  keep: value ?? backup.keep))),
+                    )
+                : null,
+          ),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<String>(
+            value: backup.location,
+            decoration: const InputDecoration(labelText: '备份位置'),
+            items: const [
+              DropdownMenuItem(value: 'local', child: Text('本地')),
+              DropdownMenuItem(value: 'server', child: Text('服务器路径（自部署）')),
+            ],
+            onChanged: backup.enabled
+                ? (value) => _updateSettings(
+                      _settings.copyWith(
+                          data: data.copyWith(
+                              backup: backup.copyWith(
+                                  location: value ?? backup.location))),
+                    )
+                : null,
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _backupPathController,
+            decoration: const InputDecoration(
+              labelText: '服务器备份路径',
+              hintText: '例如 /data/backups',
+            ),
+            onChanged: backup.enabled
+                ? (value) => _updateSettings(_settings.copyWith(
+                    data: data.copyWith(
+                        backup: backup.copyWith(serverPath: value))))
+                : null,
+          ),
+          const SizedBox(height: 18),
+          Text(
+            '同步',
+            style: Theme.of(context)
+                .textTheme
+                .titleSmall
+                ?.copyWith(fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<String>(
+            value: sync.mode,
+            decoration: const InputDecoration(labelText: '同步开关'),
+            items: const [
+              DropdownMenuItem(value: 'local', child: Text('仅本地（开发中）')),
+              DropdownMenuItem(value: 'server', child: Text('与服务器同步')),
+            ],
+            onChanged: (value) => _updateSettings(_settings.copyWith(
                 data: data.copyWith(
-                    sync: sync.copyWith(
-                        conflictStrategy: value ?? sync.conflictStrategy))),
+                    sync: sync.copyWith(mode: value ?? sync.mode)))),
           ),
-        ),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<String>(
+            value: sync.conflictStrategy,
+            decoration: const InputDecoration(labelText: '冲突策略（开发中）'),
+            items: const [
+              DropdownMenuItem(value: 'latest', child: Text('以最新为准')),
+              DropdownMenuItem(value: 'manual', child: Text('手动选择')),
+              DropdownMenuItem(value: 'duplicate', child: Text('保留两份')),
+            ],
+            onChanged: (value) => _updateSettings(
+              _settings.copyWith(
+                  data: data.copyWith(
+                      sync: sync.copyWith(
+                          conflictStrategy: value ?? sync.conflictStrategy))),
+            ),
+          ),
+        ],
         const SizedBox(height: 18),
         Text(
           '危险操作',
@@ -1163,22 +1401,24 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
               ?.copyWith(fontWeight: FontWeight.w800),
         ),
         const SizedBox(height: 10),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          value: adv.nlpExperimental,
-          onChanged: (v) => _updateSettings(
-              _settings.copyWith(advanced: adv.copyWith(nlpExperimental: v))),
-          title: const Text('自然语言解析（实验）'),
-        ),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          value: adv.lowEnergySortExperimental,
-          onChanged: (v) => _updateSettings(_settings.copyWith(
-              advanced: adv.copyWith(lowEnergySortExperimental: v))),
-          title: const Text('低能量模式排序（实验）'),
-        ),
-        const SizedBox(height: 18),
+        if (_showDevOptions) ...[
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            value: adv.nlpExperimental,
+            onChanged: (v) => _updateSettings(_settings.copyWith(
+                advanced: adv.copyWith(nlpExperimental: v))),
+            title: const Text('自然语言解析（实验）'),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            value: adv.lowEnergySortExperimental,
+            onChanged: (v) => _updateSettings(_settings.copyWith(
+                advanced: adv.copyWith(lowEnergySortExperimental: v))),
+            title: const Text('低能量模式排序（实验）'),
+          ),
+        ],
         if (widget.onOpenBackendSettings != null) ...[
+          const SizedBox(height: 18),
           Text(
             '连接',
             style: Theme.of(context)
@@ -1196,6 +1436,57 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
             ),
           ),
         ],
+      ],
+    );
+  }
+
+  Widget _buildAboutSection(BuildContext context) {
+    const githubUrl = 'https://github.com/hzc073';
+
+    return ListView(
+      children: [
+        Text(
+          '关于',
+          style: Theme.of(context)
+              .textTheme
+              .titleMedium
+              ?.copyWith(fontWeight: FontWeight.w800),
+        ),
+        const SizedBox(height: 10),
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.badge_outlined),
+          title: const Text('版本'),
+          subtitle: Text(AppVersion.current),
+        ),
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.person_outline),
+          title: const Text('作者'),
+          subtitle: const Text('夜莺'),
+        ),
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.link),
+          title: const Text('GitHub'),
+          subtitle: const Text(githubUrl),
+          trailing: IconButton(
+            tooltip: '复制',
+            onPressed: () {
+              Clipboard.setData(const ClipboardData(text: githubUrl));
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('已复制 GitHub 地址')),
+              );
+            },
+            icon: const Icon(Icons.copy),
+          ),
+          onTap: () {
+            Clipboard.setData(const ClipboardData(text: githubUrl));
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('已复制 GitHub 地址')),
+            );
+          },
+        ),
       ],
     );
   }
@@ -1392,6 +1683,16 @@ String _timeToHHmm(TimeOfDay value) {
   final hh = value.hour.toString().padLeft(2, '0');
   final mm = value.minute.toString().padLeft(2, '0');
   return '$hh:$mm';
+}
+
+String _formatUtcOffsetMinutes(int minutes) {
+  final sign = minutes >= 0 ? '+' : '-';
+  final abs = minutes.abs();
+  final hh = (abs ~/ 60).toString().padLeft(2, '0');
+  final mm = (abs % 60).toString().padLeft(2, '0');
+  final base = 'UTC$sign$hh:$mm';
+  if (minutes == 8 * 60) return '$base (上海)';
+  return base;
 }
 
 String _avatarLetter(String value) {

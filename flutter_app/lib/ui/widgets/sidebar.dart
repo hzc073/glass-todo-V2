@@ -1,6 +1,8 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:flutter/foundation.dart';
 
+import '../../core/app_version.dart';
 import '../app_theme.dart';
 import '../workspace_view.dart';
 
@@ -50,6 +52,14 @@ class Sidebar extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 10),
+          if (kIsWeb)
+            Text(
+              AppVersion.web,
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: AppColors.inkSoft,
+                    fontWeight: FontWeight.w600,
+                  ),
+            ),
         ],
       ),
     );

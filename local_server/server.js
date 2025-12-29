@@ -276,6 +276,98 @@ const utcDayStartMs = (ms) => {
     return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
 };
 
+const parseTzOffsetMinutesOrNull = (raw) => {
+    const minutes = parseIntSafe(raw);
+    if (!Number.isFinite(minutes)) return null;
+    // IANA max is +/-14:00
+    return Math.max(-14 * 60, Math.min(14 * 60, minutes));
+};
+
+const clampTzOffsetMinutes = (raw) => parseTzOffsetMinutesOrNull(raw) ?? 0;
+
+// Convert timestamp to local date key using a fixed offset (minutes = local - utc).
+const toLocalDateKey = (ms, tzOffsetMinutes) => {
+    const offsetMs = tzOffsetMinutes * 60 * 1000;
+    const date = new Date(ms + offsetMs);
+    const y = date.getUTCFullYear();
+    const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(date.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+};
+
+// Start of local day in epoch ms (UTC timeline), using a fixed offset.
+const localDayStartMs = (ms, tzOffsetMinutes) => {
+    const offsetMs = tzOffsetMinutes * 60 * 1000;
+    const date = new Date(ms + offsetMs);
+    const shiftedStart = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+    return shiftedStart - offsetMs;
+};
+
+// Start of local hour in epoch ms (UTC timeline), using a fixed offset.
+const localHourStartMs = (ms, tzOffsetMinutes) => {
+    const offsetMs = tzOffsetMinutes * 60 * 1000;
+    const date = new Date(ms + offsetMs);
+    const shiftedStart = Date.UTC(
+        date.getUTCFullYear(),
+        date.getUTCMonth(),
+        date.getUTCDate(),
+        date.getUTCHours(),
+    );
+    return shiftedStart - offsetMs;
+};
+
+// Monday=1 ... Sunday=7 (Dart-compatible), using a fixed offset.
+const toLocalWeekday = (ms, tzOffsetMinutes) => {
+    const offsetMs = tzOffsetMinutes * 60 * 1000;
+    const date = new Date(ms + offsetMs);
+    const day = date.getUTCDay(); // 0..6 where 0 is Sunday
+    return day === 0 ? 7 : day;
+};
+
+// Start of local week in epoch ms (UTC timeline), using a fixed offset.
+// weekStart: 'monday' | 'tuesday' | 'wednesday' | 'thursday' | 'friday' | 'saturday' | 'sunday'
+const localWeekStartMs = (ms, tzOffsetMinutes, weekStart = 'monday') => {
+    const startRaw = String(weekStart || '').trim().toLowerCase();
+    const startWeekday = ({
+        monday: 1,
+        tuesday: 2,
+        wednesday: 3,
+        thursday: 4,
+        friday: 5,
+        saturday: 6,
+        sunday: 7,
+    }[startRaw]) || 1;
+    const weekday = toLocalWeekday(ms, tzOffsetMinutes); // Monday=1..Sunday=7
+    const dayStart = localDayStartMs(ms, tzOffsetMinutes);
+    const daysSinceStart = (weekday - startWeekday + 7) % 7;
+    return dayStart - (daysSinceStart * DAY_MS);
+};
+
+const sumUnionIntervalsMs = (intervals) => {
+    const sorted = intervals
+        .map(([s, e]) => [s, e])
+        .filter(([s, e]) => Number.isFinite(s) && Number.isFinite(e) && e > s)
+        .sort((a, b) => (a[0] - b[0]) || (a[1] - b[1]));
+
+    if (!sorted.length) return 0;
+
+    let total = 0;
+    let curStart = sorted[0][0];
+    let curEnd = sorted[0][1];
+    for (let i = 1; i < sorted.length; i++) {
+        const [start, end] = sorted[i];
+        if (start <= curEnd) {
+            curEnd = Math.max(curEnd, end);
+        } else {
+            total += (curEnd - curStart);
+            curStart = start;
+            curEnd = end;
+        }
+    }
+    total += (curEnd - curStart);
+    return total;
+};
+
 ensureDir(ATTACHMENTS_DIR);
 ensureDir(ATTACHMENTS_TMP_DIR);
 
@@ -510,7 +602,7 @@ const sendFcmToUser = async (username, payload) => {
 
     const message = {
         tokens,
-        notification: title || body ? { title, body } : undefined,
+        android: { priority: 'high' },
         data: {
             ...(title ? { title } : {}),
             ...(body ? { body } : {}),
@@ -644,8 +736,11 @@ const getUserSettingsDefaults = () => ({
         theme: 'system',
         colorTheme: 'default',
         weekStart: 'monday',
+        timeZoneOffsetMinutes: 480,
         calendarTimelineDefaultHour: 8,
         shortcutsEnabled: true,
+        shortcutNewTask: 'n',
+        shortcutSearch: '/',
         naturalLanguageEnabled: true,
         matrixScope: 'today',
         matrixTodayOnly: true
@@ -737,6 +832,12 @@ const sanitizeUserSettings = (input = {}) => {
         return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
     };
 
+    const safeShortcut = (value, fallback) => {
+        const raw = safeString(value, 32);
+        if (!raw) return fallback;
+        return raw;
+    };
+
     const profile = input.profile && typeof input.profile === 'object' ? input.profile : {};
     const preferences = input.preferences && typeof input.preferences === 'object' ? input.preferences : {};
     const notifications = input.notifications && typeof input.notifications === 'object' ? input.notifications : {};
@@ -764,13 +865,22 @@ const sanitizeUserSettings = (input = {}) => {
         ? matrixScopeRaw
         : defaults.preferences.matrixScope;
     const matrixTodayOnly = matrixScope === 'today';
-    const weekStart = pickOne(preferences.weekStart, ['monday', 'sunday'], defaults.preferences.weekStart);
+    const weekStart = pickOne(
+        preferences.weekStart,
+        ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'],
+        defaults.preferences.weekStart
+    );
+    const timeZoneOffsetMinutes =
+        parseTzOffsetMinutesOrNull(preferences.timeZoneOffsetMinutes ?? preferences.tzOffsetMinutes) ??
+        defaults.preferences.timeZoneOffsetMinutes;
     const calendarTimelineDefaultHour = clampInt(
         preferences.calendarTimelineDefaultHour,
         defaults.preferences.calendarTimelineDefaultHour,
         0,
         23
     );
+    const shortcutNewTask = safeShortcut(preferences.shortcutNewTask, defaults.preferences.shortcutNewTask);
+    const shortcutSearch = safeShortcut(preferences.shortcutSearch, defaults.preferences.shortcutSearch);
 
     const notificationsEnabled = typeof notifications.enabled === 'boolean'
         ? notifications.enabled
@@ -789,8 +899,11 @@ const sanitizeUserSettings = (input = {}) => {
             theme,
             colorTheme,
             weekStart,
+            timeZoneOffsetMinutes,
             calendarTimelineDefaultHour,
             shortcutsEnabled: parseBoolStrict(preferences.shortcutsEnabled, defaults.preferences.shortcutsEnabled),
+            shortcutNewTask,
+            shortcutSearch,
             naturalLanguageEnabled: parseBoolStrict(preferences.naturalLanguageEnabled, defaults.preferences.naturalLanguageEnabled),
             matrixScope,
             matrixTodayOnly
@@ -1684,6 +1797,12 @@ app.get('/api/v2/export', authenticate, async (req, res) => {
             deletedAt: row.deleted_at
         }));
 
+        const goalRows = await dbAll(
+            "SELECT * FROM time_activity_goals WHERE username = ? ORDER BY updated_at DESC",
+            [username]
+        );
+        const goals = goalRows.map(mapGoalRow);
+
         const settingsRow = await dbAll("SELECT settings_json FROM user_settings WHERE username = ?", [username]);
         let userSettings = getUserSettingsDefaults();
         if (settingsRow.length && settingsRow[0].settings_json) {
@@ -1748,7 +1867,8 @@ app.get('/api/v2/export', authenticate, async (req, res) => {
                 },
                 timeTracking: {
                     activities,
-                    entries
+                    entries,
+                    goals
                 },
                 pomodoro: {
                     settings: pomodoroSettings,
@@ -1776,6 +1896,7 @@ app.post('/api/v2/import', authenticate, async (req, res) => {
     const clearUserData = async () => {
         await dbRun("DELETE FROM tasks_v2 WHERE username = ?", [username]);
         await dbRun("DELETE FROM time_entries WHERE username = ?", [username]);
+        await dbRun("DELETE FROM time_activity_goals WHERE username = ?", [username]);
         await dbRun("DELETE FROM time_activities WHERE username = ?", [username]);
         await dbRun("DELETE FROM pomodoro_sessions WHERE username = ?", [username]);
         await dbRun("DELETE FROM pomodoro_daily_stats WHERE username = ?", [username]);
@@ -1952,6 +2073,7 @@ app.post('/api/v2/import', authenticate, async (req, res) => {
     const importTimeTracking = async () => {
         const activities = Array.isArray(data?.timeTracking?.activities) ? data.timeTracking.activities : [];
         const entries = Array.isArray(data?.timeTracking?.entries) ? data.timeTracking.entries : [];
+        const goals = Array.isArray(data?.timeTracking?.goals) ? data.timeTracking.goals : [];
 
         for (const a of activities) {
             const id = String(a?.id || '').trim();
@@ -1993,6 +2115,72 @@ app.post('/api/v2/import', authenticate, async (req, res) => {
                 (id, username, activity_id, task_id, started_at, ended_at, duration_ms, note, tags_json, created_at, updated_at, deleted_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [id, username, activityId, taskId, startedAt, endedAt ?? null, durationMs ?? null, note, JSON.stringify(tags), createdAt, updatedAt, deletedAt ?? null]
+            );
+        }
+
+        const normalizeGoalDurationMs = (value) => {
+            const parsed = parseIntSafe(value);
+            if (!Number.isFinite(parsed) || parsed <= 0) return null;
+            return parsed;
+        };
+        const normalizeGoalCount = (value) => {
+            const parsed = parseIntSafe(value);
+            if (!Number.isFinite(parsed) || parsed <= 0) return null;
+            return parsed;
+        };
+
+        for (const g of goals) {
+            const activityId = String(g?.activityId ?? g?.activity_id ?? '').trim();
+            if (!activityId) continue;
+
+            const targets = g?.targets && typeof g.targets === 'object' ? g.targets : {};
+            const daily = targets?.daily && typeof targets.daily === 'object' ? targets.daily : {};
+            const weekly = targets?.weekly && typeof targets.weekly === 'object' ? targets.weekly : {};
+            const total = targets?.total && typeof targets.total === 'object' ? targets.total : {};
+
+            const dailyDurationMs = normalizeGoalDurationMs(
+                daily?.durationMs ?? g?.dailyDurationMs ?? g?.daily_duration_ms
+            );
+            const dailyCount = normalizeGoalCount(daily?.count ?? g?.dailyCount ?? g?.daily_count);
+            const weeklyDurationMs = normalizeGoalDurationMs(
+                weekly?.durationMs ?? g?.weeklyDurationMs ?? g?.weekly_duration_ms
+            );
+            const weeklyCount = normalizeGoalCount(weekly?.count ?? g?.weeklyCount ?? g?.weekly_count);
+            const totalDurationMs = normalizeGoalDurationMs(
+                total?.durationMs ?? g?.totalDurationMs ?? g?.total_duration_ms
+            );
+            const totalCount = normalizeGoalCount(total?.count ?? g?.totalCount ?? g?.total_count);
+
+            if (
+                dailyDurationMs === null &&
+                dailyCount === null &&
+                weeklyDurationMs === null &&
+                weeklyCount === null &&
+                totalDurationMs === null &&
+                totalCount === null
+            ) {
+                continue;
+            }
+
+            const createdAt = parseIntSafe(g?.createdAt ?? g?.created_at) ?? now;
+            const updatedAt = parseIntSafe(g?.updatedAt ?? g?.updated_at) ?? now;
+
+            await dbRun(
+                `INSERT OR REPLACE INTO time_activity_goals
+                (username, activity_id, daily_duration_ms, daily_count, weekly_duration_ms, weekly_count, total_duration_ms, total_count, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                    username,
+                    activityId,
+                    dailyDurationMs,
+                    dailyCount,
+                    weeklyDurationMs,
+                    weeklyCount,
+                    totalDurationMs,
+                    totalCount,
+                    createdAt,
+                    updatedAt
+                ]
             );
         }
     };
@@ -2121,6 +2309,7 @@ app.post('/api/user/delete', authenticate, async (req, res) => {
         await dbRun('BEGIN TRANSACTION');
         await dbRun("DELETE FROM tasks_v2 WHERE username = ?", [username]);
         await dbRun("DELETE FROM time_entries WHERE username = ?", [username]);
+        await dbRun("DELETE FROM time_activity_goals WHERE username = ?", [username]);
         await dbRun("DELETE FROM time_activities WHERE username = ?", [username]);
         await dbRun("DELETE FROM pomodoro_sessions WHERE username = ?", [username]);
         await dbRun("DELETE FROM pomodoro_daily_stats WHERE username = ?", [username]);
@@ -2536,6 +2725,7 @@ app.get('/api/holidays/:year', authenticate, async (req, res) => {
 
 // --- API v2 routes ---
 const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
 
 const mapTaskRow = (row = {}) => ({
     id: row.id,
@@ -2587,12 +2777,70 @@ const mapEntryRow = (row = {}) => ({
     deletedAt: row.deleted_at
 });
 
+const mapGoalRow = (row = {}) => ({
+    activityId: row.activity_id,
+    targets: {
+        daily: {
+            durationMs: parseIntSafe(row.daily_duration_ms) ?? 0,
+            count: parseIntSafe(row.daily_count) ?? 0,
+        },
+        weekly: {
+            durationMs: parseIntSafe(row.weekly_duration_ms) ?? 0,
+            count: parseIntSafe(row.weekly_count) ?? 0,
+        },
+        total: {
+            durationMs: parseIntSafe(row.total_duration_ms) ?? 0,
+            count: parseIntSafe(row.total_count) ?? 0,
+        },
+    },
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+});
+
 const getRangeFromQuery = (req, now) => {
     const fromRaw = parseIntSafe(req.query.from);
     const toRaw = parseIntSafe(req.query.to);
     const from = Number.isFinite(fromRaw) ? fromRaw : utcDayStartMs(now - (DAY_MS * 6));
     const to = Number.isFinite(toRaw) ? toRaw : now;
     return { from, to };
+};
+
+const getTimeRangeFromQuery = (req, now, tzOffsetMinutes) => {
+    const fromRaw = parseIntSafe(req.query.from);
+    const toRaw = parseIntSafe(req.query.to);
+    const fromDefault = localDayStartMs(now - (DAY_MS * 6), tzOffsetMinutes);
+    const from = Number.isFinite(fromRaw) ? fromRaw : fromDefault;
+    const to = Number.isFinite(toRaw) ? toRaw : now;
+    return { from, to };
+};
+
+const getUserTimeConfig = async (username) => {
+    let settings = getUserSettingsDefaults();
+    try {
+        const settingsRow = await dbAll("SELECT settings_json FROM user_settings WHERE username = ?", [username]);
+        if (settingsRow.length && settingsRow[0].settings_json) {
+            try {
+                settings = sanitizeUserSettings(JSON.parse(settingsRow[0].settings_json));
+            } catch (e) {}
+        }
+    } catch (e) {}
+
+    const weekStartRaw = String(settings?.preferences?.weekStart || '').trim().toLowerCase();
+    const weekStartAllowed = new Set([
+        'monday',
+        'tuesday',
+        'wednesday',
+        'thursday',
+        'friday',
+        'saturday',
+        'sunday',
+    ]);
+    const weekStart = weekStartAllowed.has(weekStartRaw) ? weekStartRaw : 'monday';
+    const tzOffsetMinutes =
+        parseTzOffsetMinutesOrNull(settings?.preferences?.timeZoneOffsetMinutes) ??
+        parseTzOffsetMinutesOrNull(settings?.preferences?.tzOffsetMinutes) ??
+        480;
+    return { weekStart, tzOffsetMinutes };
 };
 
 // v2 tasks
@@ -3466,24 +3714,254 @@ app.delete('/api/v2/time/entries/:id', authenticate, async (req, res) => {
     }
 });
 
+// v2 time goals
+app.get('/api/v2/time/goals', authenticate, async (req, res) => {
+    const now = Date.now();
+    try {
+        const config = await getUserTimeConfig(req.user.username);
+        const tzQueryRaw =
+            req.query.tzOffsetMinutes ?? req.query.tz_offset_minutes ?? req.query.tzOffset ?? req.query.tz_offset;
+        const tzFromQuery = parseTzOffsetMinutesOrNull(tzQueryRaw);
+        const tzOffsetMinutes = tzFromQuery === null ? config.tzOffsetMinutes : tzFromQuery;
+        const weekStart = config.weekStart;
+
+        const dayFrom = localDayStartMs(now, tzOffsetMinutes);
+        const weekFrom = localWeekStartMs(now, tzOffsetMinutes, weekStart);
+
+        const goalRows = await dbAll(
+            "SELECT * FROM time_activity_goals WHERE username = ? ORDER BY updated_at DESC",
+            [req.user.username]
+        );
+        const activityIds = goalRows.map((r) => String(r.activity_id || '').trim()).filter((id) => id);
+
+        const emptyProgress = () => ({
+            daily: { durationMs: 0, count: 0 },
+            weekly: { durationMs: 0, count: 0 },
+            total: { durationMs: 0, count: 0 },
+        });
+
+        const progressByActivity = {};
+        activityIds.forEach((id) => {
+            progressByActivity[id] = emptyProgress();
+        });
+
+        if (activityIds.length) {
+            const placeholders = activityIds.map(() => '?').join(',');
+            const entryRows = await dbAll(
+                `SELECT activity_id, started_at, ended_at
+                 FROM time_entries
+                 WHERE username = ? AND deleted_at IS NULL AND activity_id IN (${placeholders})`,
+                [req.user.username, ...activityIds]
+            );
+
+            const dayCountTo = dayFrom + DAY_MS;
+            const weekCountTo = weekFrom + DAY_MS * 7;
+
+            for (const row of entryRows) {
+                const activityId = String(row.activity_id || '').trim();
+                const bucket = progressByActivity[activityId];
+                if (!bucket) continue;
+
+                const startedAt = parseIntSafe(row.started_at);
+                if (!Number.isFinite(startedAt)) continue;
+                const endedAt = parseIntSafe(row.ended_at);
+                const end = Math.min(Number.isFinite(endedAt) ? endedAt : now, now);
+                if (end <= startedAt) continue;
+
+                bucket.total.durationMs += (end - startedAt);
+                const isEnded = Number.isFinite(endedAt);
+                if (isEnded) bucket.total.count += 1;
+
+                const dayStart = Math.max(startedAt, dayFrom);
+                if (end > dayStart) bucket.daily.durationMs += (end - dayStart);
+
+                const weekStartMs = Math.max(startedAt, weekFrom);
+                if (end > weekStartMs) bucket.weekly.durationMs += (end - weekStartMs);
+
+                if (isEnded) {
+                    if (startedAt >= dayFrom && startedAt < dayCountTo) bucket.daily.count += 1;
+                    if (startedAt >= weekFrom && startedAt < weekCountTo) bucket.weekly.count += 1;
+                }
+            }
+        }
+
+        const goals = goalRows.map((row) => ({
+            activityId: row.activity_id,
+            targets: mapGoalRow(row).targets,
+            progress: progressByActivity[row.activity_id] || emptyProgress(),
+            createdAt: row.created_at,
+            updatedAt: row.updated_at,
+        }));
+
+        return res.json({
+            now,
+            tzOffsetMinutes,
+            weekStart,
+            ranges: {
+                day: { from: dayFrom, to: now },
+                week: { from: weekFrom, to: now },
+            },
+            goals,
+        });
+    } catch (e) {
+        return res.status(500).json({ error: 'Failed to load goals' });
+    }
+});
+
+app.put('/api/v2/time/goals/:activityId', authenticate, async (req, res) => {
+    const activityId = String(req.params.activityId || '').trim();
+    if (!activityId) return res.status(400).json({ error: 'Invalid activity id' });
+
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const targets = body.targets && typeof body.targets === 'object' ? body.targets : {};
+    const daily = targets.daily && typeof targets.daily === 'object' ? targets.daily : {};
+    const weekly = targets.weekly && typeof targets.weekly === 'object' ? targets.weekly : {};
+    const total = targets.total && typeof targets.total === 'object' ? targets.total : {};
+
+    const hasOwn = (obj, key) => obj && typeof obj === 'object' && Object.prototype.hasOwnProperty.call(obj, key);
+    const pickRaw = (nestedObj, nestedKey, flatKeys) => {
+        if (hasOwn(nestedObj, nestedKey)) return nestedObj[nestedKey];
+        for (const k of flatKeys) {
+            if (hasOwn(body, k)) return body[k];
+        }
+        return undefined;
+    };
+
+    const normalizeDurationMs = (raw) => {
+        if (raw === null) return null;
+        const parsed = parseIntSafe(raw);
+        if (!Number.isFinite(parsed) || parsed <= 0) return null;
+        return parsed;
+    };
+    const normalizeCount = (raw) => {
+        if (raw === null) return null;
+        const parsed = parseIntSafe(raw);
+        if (!Number.isFinite(parsed) || parsed <= 0) return null;
+        return parsed;
+    };
+
+    try {
+        const activityRows = await dbAll(
+            "SELECT id FROM time_activities WHERE id = ? AND username = ? AND deleted_at IS NULL",
+            [activityId, req.user.username]
+        );
+        if (!activityRows.length) return res.status(404).json({ error: 'Activity not found' });
+
+        const existingRows = await dbAll(
+            "SELECT * FROM time_activity_goals WHERE username = ? AND activity_id = ?",
+            [req.user.username, activityId]
+        );
+        const existing = existingRows.length ? existingRows[0] : null;
+        const now = Date.now();
+
+        const currentDailyDuration = existing ? existing.daily_duration_ms : null;
+        const currentDailyCount = existing ? existing.daily_count : null;
+        const currentWeeklyDuration = existing ? existing.weekly_duration_ms : null;
+        const currentWeeklyCount = existing ? existing.weekly_count : null;
+        const currentTotalDuration = existing ? existing.total_duration_ms : null;
+        const currentTotalCount = existing ? existing.total_count : null;
+
+        const rawDailyDuration = pickRaw(daily, 'durationMs', ['dailyDurationMs', 'daily_duration_ms']);
+        const rawDailyCount = pickRaw(daily, 'count', ['dailyCount', 'daily_count']);
+        const rawWeeklyDuration = pickRaw(weekly, 'durationMs', ['weeklyDurationMs', 'weekly_duration_ms']);
+        const rawWeeklyCount = pickRaw(weekly, 'count', ['weeklyCount', 'weekly_count']);
+        const rawTotalDuration = pickRaw(total, 'durationMs', ['totalDurationMs', 'total_duration_ms']);
+        const rawTotalCount = pickRaw(total, 'count', ['totalCount', 'total_count']);
+
+        const nextDailyDuration = rawDailyDuration === undefined ? currentDailyDuration : normalizeDurationMs(rawDailyDuration);
+        const nextDailyCount = rawDailyCount === undefined ? currentDailyCount : normalizeCount(rawDailyCount);
+        const nextWeeklyDuration = rawWeeklyDuration === undefined ? currentWeeklyDuration : normalizeDurationMs(rawWeeklyDuration);
+        const nextWeeklyCount = rawWeeklyCount === undefined ? currentWeeklyCount : normalizeCount(rawWeeklyCount);
+        const nextTotalDuration = rawTotalDuration === undefined ? currentTotalDuration : normalizeDurationMs(rawTotalDuration);
+        const nextTotalCount = rawTotalCount === undefined ? currentTotalCount : normalizeCount(rawTotalCount);
+
+        const hasAny =
+            nextDailyDuration !== null ||
+            nextDailyCount !== null ||
+            nextWeeklyDuration !== null ||
+            nextWeeklyCount !== null ||
+            nextTotalDuration !== null ||
+            nextTotalCount !== null;
+
+        if (!hasAny) {
+            await dbRun(
+                "DELETE FROM time_activity_goals WHERE username = ? AND activity_id = ?",
+                [req.user.username, activityId]
+            );
+            return res.json({ success: true, goal: null });
+        }
+
+        const createdAt = existing ? existing.created_at : now;
+        await dbRun(
+            `INSERT OR REPLACE INTO time_activity_goals
+            (username, activity_id, daily_duration_ms, daily_count, weekly_duration_ms, weekly_count, total_duration_ms, total_count, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+                req.user.username,
+                activityId,
+                nextDailyDuration,
+                nextDailyCount,
+                nextWeeklyDuration,
+                nextWeeklyCount,
+                nextTotalDuration,
+                nextTotalCount,
+                createdAt,
+                now,
+            ]
+        );
+
+        const rows = await dbAll(
+            "SELECT * FROM time_activity_goals WHERE username = ? AND activity_id = ?",
+            [req.user.username, activityId]
+        );
+        const goal = rows.length ? mapGoalRow(rows[0]) : null;
+        return res.json({ success: true, goal });
+    } catch (e) {
+        return res.status(500).json({ error: 'Failed to save goal' });
+    }
+});
+
+app.delete('/api/v2/time/goals/:activityId', authenticate, async (req, res) => {
+    const activityId = String(req.params.activityId || '').trim();
+    if (!activityId) return res.status(400).json({ error: 'Invalid activity id' });
+    try {
+        await dbRun(
+            "DELETE FROM time_activity_goals WHERE username = ? AND activity_id = ?",
+            [req.user.username, activityId]
+        );
+        return res.json({ success: true });
+    } catch (e) {
+        return res.status(500).json({ error: 'Failed to delete goal' });
+    }
+});
+
 // v2 time stats
 app.get('/api/v2/time/stats', authenticate, async (req, res) => {
     const now = Date.now();
-    const { from, to } = getRangeFromQuery(req, now);
+    const config = await getUserTimeConfig(req.user.username);
+    const tzQueryRaw =
+        req.query.tzOffsetMinutes ?? req.query.tz_offset_minutes ?? req.query.tzOffset ?? req.query.tz_offset;
+    const tzFromQuery = parseTzOffsetMinutesOrNull(tzQueryRaw);
+    const tzOffsetMinutes = tzFromQuery === null ? config.tzOffsetMinutes : tzFromQuery;
+    const { from, to } = getTimeRangeFromQuery(req, now, tzOffsetMinutes);
     if (to <= from) return res.status(400).json({ error: 'Invalid range' });
 
     try {
         const rows = await dbAll(
-            `SELECT activity_id, started_at, ended_at
-             FROM time_entries
-             WHERE username = ? AND deleted_at IS NULL
-               AND started_at < ? AND (ended_at IS NULL OR ended_at > ?)`,
+            `SELECT e.activity_id, e.started_at, e.ended_at, COALESCE(a.category, '') AS category
+             FROM time_entries e
+             LEFT JOIN time_activities a
+               ON a.id = e.activity_id AND a.username = e.username
+             WHERE e.username = ? AND e.deleted_at IS NULL
+               AND e.started_at < ? AND (e.ended_at IS NULL OR e.ended_at > ?)`,
             [req.user.username, to, from]
         );
 
         const byDay = {};
         const byActivity = {};
+        const byCategory = {};
         let totalMs = 0;
+        const trackedIntervals = [];
 
         rows.forEach((row) => {
             const start = Math.max(row.started_at, from);
@@ -3491,29 +3969,165 @@ app.get('/api/v2/time/stats', authenticate, async (req, res) => {
             if (end <= start) return;
             const duration = end - start;
             totalMs += duration;
+            trackedIntervals.push([start, end]);
 
             const activityId = row.activity_id;
             byActivity[activityId] = (byActivity[activityId] || 0) + duration;
 
+            const category = String(row.category || '').trim();
+            byCategory[category] = (byCategory[category] || 0) + duration;
+
             let cursor = start;
             while (cursor < end) {
-                const dayStart = utcDayStartMs(cursor);
+                const dayStart = localDayStartMs(cursor, tzOffsetMinutes);
                 const dayEnd = dayStart + DAY_MS;
                 const segEnd = Math.min(end, dayEnd);
-                const key = toUtcDateKey(cursor);
+                const key = toLocalDateKey(cursor, tzOffsetMinutes);
                 byDay[key] = (byDay[key] || 0) + (segEnd - cursor);
                 cursor = segEnd;
             }
         });
 
+        // Untracked time: (range) - (union of tracked intervals).
+        // Bound the calculation to [firstRecordStart, now] to avoid showing
+        // huge untracked time before user started tracking and in the future.
+        const first = await dbAll(
+            "SELECT started_at FROM time_entries WHERE username = ? AND deleted_at IS NULL ORDER BY started_at ASC LIMIT 1",
+            [req.user.username]
+        );
+        const minStart = first.length ? first[0].started_at : null;
+        const actualStart = minStart == null ? null : Math.max(from, minStart);
+        const actualEnd = minStart == null ? null : Math.min(to, now);
+        const untrackedMs = (actualStart == null || actualEnd == null || actualEnd <= actualStart)
+            ? 0
+            : Math.max(
+                0,
+                (actualEnd - actualStart) - sumUnionIntervalsMs(
+                    trackedIntervals
+                        .map(([s, e]) => [Math.max(s, actualStart), Math.min(e, actualEnd)])
+                        .filter(([s, e]) => e > s)
+                ),
+            );
+
         res.json({
             range: { from, to },
-            totals: { totalMs },
+            tzOffsetMinutes,
+            totals: { totalMs, untrackedMs },
             byDay,
-            byActivity
+            byActivity,
+            byCategory
         });
     } catch (e) {
         res.status(500).json({ error: 'Failed to load stats' });
+    }
+});
+
+app.get('/api/v2/time/stats/detail', authenticate, async (req, res) => {
+    const now = Date.now();
+    const config = await getUserTimeConfig(req.user.username);
+    const tzQueryRaw =
+        req.query.tzOffsetMinutes ?? req.query.tz_offset_minutes ?? req.query.tzOffset ?? req.query.tz_offset;
+    const tzFromQuery = parseTzOffsetMinutesOrNull(tzQueryRaw);
+    const tzOffsetMinutes = tzFromQuery === null ? config.tzOffsetMinutes : tzFromQuery;
+    const { from, to } = getTimeRangeFromQuery(req, now, tzOffsetMinutes);
+    if (to <= from) return res.status(400).json({ error: 'Invalid range' });
+
+    const type = String(req.query.type || req.query.filterType || req.query.filter_type || '')
+        .trim()
+        .toLowerCase();
+    const id = String(req.query.id ?? req.query.activityId ?? req.query.activity_id ?? req.query.category ?? '').trim();
+
+    if (type !== 'activity' && type !== 'category') {
+        return res.status(400).json({ error: 'Invalid type' });
+    }
+
+    try {
+        const baseSql = `SELECT e.activity_id, e.started_at, e.ended_at, COALESCE(a.category, '') AS category
+             FROM time_entries e
+             LEFT JOIN time_activities a
+               ON a.id = e.activity_id AND a.username = e.username
+             WHERE e.username = ? AND e.deleted_at IS NULL
+               AND e.started_at < ? AND (e.ended_at IS NULL OR e.ended_at > ?)`;
+        const params = [req.user.username, to, from];
+        let sql = baseSql;
+        if (type === 'activity') {
+            sql += ' AND e.activity_id = ?';
+            params.push(id);
+        } else {
+            sql += " AND COALESCE(a.category, '') = ?";
+            params.push(id);
+        }
+
+        const rows = await dbAll(sql, params);
+
+        const byDay = {};
+        const hourly = Array(24).fill(0);
+        const weekday = Array(7).fill(0); // Monday..Sunday
+        let totalMs = 0;
+        let count = 0;
+
+        rows.forEach((row) => {
+            const start = Math.max(row.started_at, from);
+            const end = Math.min(row.ended_at || now, to);
+            if (end <= start) return;
+
+            totalMs += (end - start);
+            const startedAt = parseIntSafe(row.started_at);
+            const endedAt = parseIntSafe(row.ended_at);
+            const isEnded = Number.isFinite(endedAt);
+            if (
+                isEnded &&
+                Number.isFinite(startedAt) &&
+                startedAt >= from &&
+                startedAt < to &&
+                endedAt > startedAt
+            ) {
+                count += 1;
+                const startKey = toLocalDateKey(startedAt, tzOffsetMinutes);
+                if (!byDay[startKey]) byDay[startKey] = { totalMs: 0, count: 0 };
+                byDay[startKey].count += 1;
+            }
+
+            // Split by local day.
+            let cursor = start;
+            while (cursor < end) {
+                const dayStart = localDayStartMs(cursor, tzOffsetMinutes);
+                const dayEnd = dayStart + DAY_MS;
+                const segEnd = Math.min(end, dayEnd);
+                const key = toLocalDateKey(cursor, tzOffsetMinutes);
+                if (!byDay[key]) byDay[key] = { totalMs: 0, count: 0 };
+                byDay[key].totalMs += (segEnd - cursor);
+
+                const wd = toLocalWeekday(cursor, tzOffsetMinutes);
+                weekday[wd - 1] += (segEnd - cursor);
+
+                cursor = segEnd;
+            }
+
+            // Split by local hour.
+            let hourCursor = start;
+            const offsetMs = tzOffsetMinutes * 60 * 1000;
+            while (hourCursor < end) {
+                const hourStart = localHourStartMs(hourCursor, tzOffsetMinutes);
+                const hourEnd = hourStart + HOUR_MS;
+                const segEnd = Math.min(end, hourEnd);
+                const hour = new Date(hourCursor + offsetMs).getUTCHours();
+                hourly[hour] += (segEnd - hourCursor);
+                hourCursor = segEnd;
+            }
+        });
+
+        res.json({
+            range: { from, to },
+            tzOffsetMinutes,
+            filter: { type, id },
+            totals: { totalMs, count },
+            byDay,
+            hourly,
+            weekday,
+        });
+    } catch (e) {
+        res.status(500).json({ error: 'Failed to load stats detail' });
     }
 });
 

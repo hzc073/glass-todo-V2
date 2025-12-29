@@ -10,8 +10,11 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 
 import '../core/api_client.dart';
+import '../core/keyboard_shortcuts.dart';
 import '../core/notifications/local_task_notifications.dart';
+import '../core/notifications/time_tracking_notifications.dart';
 import '../core/time_repository.dart';
+import '../core/time_tracking_refresh_bus.dart';
 import '../models/checklist.dart';
 import '../models/holiday_cn.dart';
 import '../models/pomodoro_session.dart';
@@ -19,6 +22,7 @@ import '../models/pomodoro_summary.dart';
 import '../models/task.dart';
 import '../models/time_activity.dart';
 import '../models/time_entry.dart';
+import '../models/time_goals.dart';
 import '../models/time_stats.dart';
 import '../models/user_settings.dart';
 import 'app_theme.dart';
@@ -27,6 +31,8 @@ import 'pomodoro_view.dart';
 import 'stats_dashboard_view.dart';
 import 'task_filters.dart';
 import 'task_colors.dart';
+import 'time_goal_editor_sheet.dart';
+import 'time_stats_sheet.dart';
 import 'time_tracking_view.dart';
 import 'workspace_view.dart';
 import 'widgets/empty_state.dart';
@@ -34,6 +40,7 @@ import 'widgets/staggered_fade_slide.dart';
 import 'widgets/task_card.dart';
 import 'widgets/time_activity_editor.dart';
 import 'widgets/time_entry_editor.dart';
+import '../utils/download.dart';
 
 class TaskPage extends StatefulWidget {
   const TaskPage({
@@ -42,6 +49,7 @@ class TaskPage extends StatefulWidget {
     required this.username,
     required this.apiClient,
     required this.userSettings,
+    required this.timeTrackingOngoingNotificationEnabled,
     required this.onLogout,
     required this.onOpenSettings,
     required this.workspace,
@@ -52,6 +60,7 @@ class TaskPage extends StatefulWidget {
   final String username;
   final ApiClient apiClient;
   final UserSettings userSettings;
+  final bool timeTrackingOngoingNotificationEnabled;
   final VoidCallback onLogout;
   final VoidCallback onOpenSettings;
   final WorkspaceView workspace;
@@ -65,8 +74,11 @@ class _TaskPageState extends State<TaskPage> {
   bool _isTaskDragActive = false;
   bool _androidQuickAddOpen = false;
   final _searchController = TextEditingController();
+  final _searchFocusNode = FocusNode();
   final _quickAddController = TextEditingController();
+  final _quickAddFocusNode = FocusNode();
   final _checklistAddController = TextEditingController();
+  final _checklistAddFocusNode = FocusNode();
   final _scrollController = ScrollController();
   final _dateFormatter = DateFormat('yyyy-MM-dd');
 
@@ -132,6 +144,7 @@ class _TaskPageState extends State<TaskPage> {
   bool _quickAddSubtasksExpanded = false;
 
   List<Task> _tasks = [];
+  final Set<String> _downloadingAttachmentIds = <String>{};
   List<ChecklistList> _checklists = [];
   final Map<int, List<ChecklistItem>> _checklistItems = {};
   int? _activeChecklistId;
@@ -141,6 +154,7 @@ class _TaskPageState extends State<TaskPage> {
   List<TimeEntry> _runningEntries = [];
   List<TimeEntry> _timeEntries = [];
   TaskFilter _filter = TaskFilter.inbox;
+  _TaskSortMode _taskSortMode = _TaskSortMode.deadlineAsc;
   bool _showTrash = false;
   String _searchQuery = '';
   String? _selectedTaskId;
@@ -159,6 +173,7 @@ class _TaskPageState extends State<TaskPage> {
 
   Timer? _undoTimer;
   _UndoAction? _pendingUndo;
+  StreamSubscription<void>? _timeTrackingRefreshSub;
 
   bool get _localRemindersEnabled => widget.userSettings.notifications.enabled;
 
@@ -171,6 +186,65 @@ class _TaskPageState extends State<TaskPage> {
     final granted = await LocalTaskNotifications.instance.requestPermission();
     if (!granted) return;
     await LocalTaskNotifications.instance.syncTaskReminders(_tasks);
+  }
+
+  Future<void> _syncTimeTrackingOngoingNotification() async {
+    if (!_useAndroidUi) return;
+
+    final running = _runningEntries.where((entry) => entry.isRunning).toList()
+      ..sort((a, b) => b.startedAt.compareTo(a.startedAt));
+    final currentEntry = running.isEmpty ? null : running.first;
+
+    TimeActivity? currentActivity;
+    if (currentEntry != null) {
+      for (final activity in _activities) {
+        if (activity.deletedAt != null) continue;
+        if (activity.id == currentEntry.activityId) {
+          currentActivity = activity;
+          break;
+        }
+      }
+    }
+
+    await TimeTrackingNotifications.instance.syncOngoing(
+      enabled: widget.timeTrackingOngoingNotificationEnabled,
+      runningEntry: currentEntry,
+      runningActivity: currentActivity,
+      activities: _activities,
+    );
+  }
+
+  Future<void> _refreshTasksTab() async {
+    await Future.wait([
+      _loadTasks(),
+      _loadChecklists(),
+    ]);
+  }
+
+  Future<void> _refreshMatrixTab() async {
+    await _loadTasks();
+  }
+
+  Future<void> _refreshCalendarTab() async {
+    await _loadTasks();
+  }
+
+  Future<void> _refreshTimeTrackingTab() async {
+    await Future.wait([
+      _loadTasks(),
+      _loadTimeTracking(),
+    ]);
+  }
+
+  Future<void> _refreshPomodoroTab() async {
+    await _loadTasks();
+  }
+
+  Future<void> _refreshStatsTab() async {
+    await Future.wait([
+      _loadTasks(),
+      _loadTimeStats(),
+    ]);
   }
 
   bool get _useAndroidUi => !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
@@ -370,6 +444,11 @@ class _TaskPageState extends State<TaskPage> {
   @override
   void initState() {
     super.initState();
+    _timeTrackingRefreshSub =
+        TimeTrackingRefreshBus.instance.stream.listen((_) {
+      if (!mounted) return;
+      unawaited(_loadTimeTracking());
+    });
     if (widget.userSettings.preferences.defaultView.trim() == 'today') {
       _filter = TaskFilter.today;
     }
@@ -394,16 +473,120 @@ class _TaskPageState extends State<TaskPage> {
         widget.userSettings.notifications.enabled) {
       unawaited(_syncLocalTaskReminders());
     }
+    if (oldWidget.timeTrackingOngoingNotificationEnabled !=
+        widget.timeTrackingOngoingNotificationEnabled) {
+      unawaited(_syncTimeTrackingOngoingNotification());
+    }
   }
 
   @override
   void dispose() {
+    _timeTrackingRefreshSub?.cancel();
+    _searchFocusNode.dispose();
     _searchController.dispose();
+    _quickAddFocusNode.dispose();
     _quickAddController.dispose();
+    _checklistAddFocusNode.dispose();
     _checklistAddController.dispose();
     _scrollController.dispose();
     _undoTimer?.cancel();
+    unawaited(TimeTrackingNotifications.instance.cancelOngoing());
     super.dispose();
+  }
+
+  bool _allowShortcutInTextFields(bool allowWhenEditing) {
+    if (allowWhenEditing) return true;
+    final focusedContext = FocusManager.instance.primaryFocus?.context;
+    if (focusedContext == null) return true;
+    final isEditing = focusedContext.widget is EditableText ||
+        focusedContext.findAncestorWidgetOfExactType<EditableText>() != null;
+    return !isEditing;
+  }
+
+  void _handleSearchShortcut({required bool allowWhenEditing}) {
+    if (!_allowShortcutInTextFields(allowWhenEditing)) return;
+    _searchFocusNode.requestFocus();
+    _searchController.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: _searchController.text.length,
+    );
+  }
+
+  void _handleNewTaskShortcut({required bool allowWhenEditing}) {
+    if (!_allowShortcutInTextFields(allowWhenEditing)) return;
+    if (widget.workspace != WorkspaceView.tasks) return;
+    if (_showTrash) return;
+
+    if (_useAndroidUi) {
+      _openQuickAddSheet();
+      return;
+    }
+
+    final focusNode =
+        _activeChecklistId != null ? _checklistAddFocusNode : _quickAddFocusNode;
+    focusNode.requestFocus();
+  }
+
+  Widget _wrapWithKeyboardShortcuts(Widget child) {
+    final prefs = widget.userSettings.preferences;
+    if (!prefs.shortcutsEnabled) return child;
+
+    final shortcuts = <ShortcutActivator, Intent>{};
+
+    void addShortcut(String raw, Intent intent) {
+      final activator = parseShortcutActivator(raw);
+      if (activator == null) return;
+      shortcuts.putIfAbsent(activator, () => intent);
+    }
+
+    final newTaskActivator = parseShortcutActivator(prefs.shortcutNewTask);
+    final searchActivator = parseShortcutActivator(prefs.shortcutSearch);
+
+    if (newTaskActivator != null) {
+      addShortcut(
+        prefs.shortcutNewTask,
+        _NewTaskIntent(
+            allowWhenEditing: newTaskActivator.control ||
+                newTaskActivator.alt ||
+                newTaskActivator.meta),
+      );
+    }
+    if (searchActivator != null) {
+      addShortcut(
+        prefs.shortcutSearch,
+        _SearchTasksIntent(
+            allowWhenEditing: searchActivator.control ||
+                searchActivator.alt ||
+                searchActivator.meta),
+      );
+    }
+
+    if (shortcuts.isEmpty) return child;
+
+    return Shortcuts(
+      shortcuts: shortcuts,
+      child: Actions(
+        actions: <Type, Action<Intent>>{
+          _NewTaskIntent: CallbackAction<_NewTaskIntent>(
+            onInvoke: (intent) {
+              _handleNewTaskShortcut(allowWhenEditing: intent.allowWhenEditing);
+              return null;
+            },
+          ),
+          _SearchTasksIntent: CallbackAction<_SearchTasksIntent>(
+            onInvoke: (intent) {
+              _handleSearchShortcut(
+                  allowWhenEditing: intent.allowWhenEditing);
+              return null;
+            },
+          ),
+        },
+        child: Focus(
+          autofocus: true,
+          child: child,
+        ),
+      ),
+    );
   }
 
   @override
@@ -600,7 +783,8 @@ class _TaskPageState extends State<TaskPage> {
       ],
     );
 
-    if (!_useAndroidUi) return content;
+    final contentWithShortcuts = _wrapWithKeyboardShortcuts(content);
+    if (!_useAndroidUi) return contentWithShortcuts;
 
     return PopScope(
       canPop: !_androidQuickAddOpen,
@@ -608,7 +792,7 @@ class _TaskPageState extends State<TaskPage> {
         if (didPop) return;
         if (_androidQuickAddOpen) _closeAndroidQuickAdd();
       },
-      child: content,
+      child: contentWithShortcuts,
     );
   }
 
@@ -642,6 +826,7 @@ class _TaskPageState extends State<TaskPage> {
                 child: TextField(
                   key: const ValueKey('quick_add_input'),
                   controller: _searchController,
+                  focusNode: _searchFocusNode,
                   enabled: isTasks,
                   decoration: InputDecoration(
                     hintText: isTasks ? '搜索任务...' : '搜索',
@@ -787,6 +972,60 @@ class _TaskPageState extends State<TaskPage> {
     );
   }
 
+  Widget _buildTaskSortBar(BuildContext context) {
+    return Row(
+      children: [
+        Icon(Icons.sort, size: 18, color: AppColors.inkSoft),
+        const SizedBox(width: 8),
+        Text(
+          '排序：${_taskSortMode.label}',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: AppColors.inkSoft,
+                fontWeight: FontWeight.w600,
+              ),
+        ),
+        const Spacer(),
+        PopupMenuButton<_TaskSortMode>(
+          tooltip: '排序',
+          onSelected: (value) {
+            if (value == _taskSortMode) return;
+            setState(() => _taskSortMode = value);
+          },
+          itemBuilder: (context) => [
+            CheckedPopupMenuItem<_TaskSortMode>(
+              value: _TaskSortMode.priority,
+              checked: _taskSortMode == _TaskSortMode.priority,
+              child: const Text('优先级（高→低）'),
+            ),
+            const PopupMenuDivider(),
+            CheckedPopupMenuItem<_TaskSortMode>(
+              value: _TaskSortMode.startAsc,
+              checked: _taskSortMode == _TaskSortMode.startAsc,
+              child: const Text('开始时间（早→晚）'),
+            ),
+            CheckedPopupMenuItem<_TaskSortMode>(
+              value: _TaskSortMode.startDesc,
+              checked: _taskSortMode == _TaskSortMode.startDesc,
+              child: const Text('开始时间（晚→早）'),
+            ),
+            const PopupMenuDivider(),
+            CheckedPopupMenuItem<_TaskSortMode>(
+              value: _TaskSortMode.deadlineAsc,
+              checked: _taskSortMode == _TaskSortMode.deadlineAsc,
+              child: const Text('截止时间（早→晚）'),
+            ),
+            CheckedPopupMenuItem<_TaskSortMode>(
+              value: _TaskSortMode.deadlineDesc,
+              checked: _taskSortMode == _TaskSortMode.deadlineDesc,
+              child: const Text('截止时间（晚→早）'),
+            ),
+          ],
+          icon: const Icon(Icons.tune),
+        ),
+      ],
+    );
+  }
+
   Widget _buildWorkspaceBody({
     required bool isTasks,
     required bool isMatrix,
@@ -863,6 +1102,19 @@ class _TaskPageState extends State<TaskPage> {
       final emptySubtitle = hasSearch ? '没有找到匹配的任务。' : '';
       final trashCount = _tasks.where((task) => task.deletedAt != null).length;
 
+      Widget refreshPlaceholder({required Widget child}) {
+        if (!_useAndroidUi) return Center(child: child);
+        return LayoutBuilder(
+          builder: (context, constraints) => SingleChildScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(minHeight: constraints.maxHeight),
+              child: Center(child: child),
+            ),
+          ),
+        );
+      }
+
       final ChecklistList? activeChecklist =
           isChecklistView ? _findChecklistById(_activeChecklistId) : null;
       final checklistRaw = isChecklistView
@@ -881,9 +1133,9 @@ class _TaskPageState extends State<TaskPage> {
       if (isChecklistView) {
         final loadingChecklist = _loadingChecklistId == _activeChecklistId;
         if (loadingChecklist && sortedChecklistItems.isEmpty) {
-          listBody = const Center(child: CircularProgressIndicator());
+          listBody = refreshPlaceholder(child: const CircularProgressIndicator());
         } else if (sortedChecklistItems.isEmpty) {
-          listBody = Center(
+          listBody = refreshPlaceholder(
             child: EmptyState(
               title: hasSearch ? '没有找到事项' : '清单为空',
               subtitle: emptySubtitle,
@@ -909,9 +1161,9 @@ class _TaskPageState extends State<TaskPage> {
           );
         }
       } else if (_loading) {
-        listBody = const Center(child: CircularProgressIndicator());
+        listBody = refreshPlaceholder(child: const CircularProgressIndicator());
       } else if (filtered.isEmpty) {
-        listBody = Center(
+        listBody = refreshPlaceholder(
           child: EmptyState(
             title: isTrashView ? '回收站为空' : '这里还没有内容',
             subtitle: emptySubtitle,
@@ -987,6 +1239,9 @@ class _TaskPageState extends State<TaskPage> {
           },
         );
       }
+      final listBodyWithRefresh = _useAndroidUi
+          ? RefreshIndicator(onRefresh: _refreshTasksTab, child: listBody)
+          : listBody;
       final content = Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1083,8 +1338,12 @@ class _TaskPageState extends State<TaskPage> {
               ],
             ),
           ],
+          if (!isTrashView && !isChecklistView) ...[
+            const SizedBox(height: 12),
+            _buildTaskSortBar(context),
+          ],
           const SizedBox(height: 12),
-          Expanded(child: listBody),
+          Expanded(child: listBodyWithRefresh),
           if (!isTrashView && !isChecklistView && !_useAndroidUi) ...[
             const SizedBox(height: 12),
             _TrashDropZone(
@@ -1129,10 +1388,12 @@ class _TaskPageState extends State<TaskPage> {
               child: _TaskDetailPanel(
                 task: selectedTask,
                 saving: _saving,
+                downloadingAttachmentIds: _downloadingAttachmentIds,
                 onClose: _clearSelectedTask,
                 onToggleSubtask: _toggleSubtask,
                 generateSubtaskId: _generateSubtaskId,
                 onUpdateTask: _updateTaskFromDetail,
+                onDownloadAttachment: _downloadAttachment,
                 onDeleteTask: _moveTaskToTrash,
               ),
             ),
@@ -1165,13 +1426,15 @@ class _TaskPageState extends State<TaskPage> {
               loading: _loadingTime,
               saving: _savingTime,
               lastSync: _lastTimeSync,
-              onRefresh: _loadTimeTracking,
+              onRefresh: _refreshTimeTrackingTab,
               onAddActivity: () => _openActivityEditor(),
               onToggleActivity: _toggleActivity,
               onEditActivity: (activity) =>
                   _openActivityEditor(activity: activity),
               onDeleteActivity: _confirmDeleteActivity,
               onEditEntry: _openEntryEditor,
+              onOpenStats: _openTimeStatsSheet,
+              onOpenGoal: _openTimeGoalEditor,
             ),
           ),
         ],
@@ -1181,7 +1444,7 @@ class _TaskPageState extends State<TaskPage> {
     if (isPomodoro) {
       final availableTasks =
           _tasks.where((task) => task.deletedAt == null).toList();
-      return PomodoroView(
+      final view = PomodoroView(
         apiClient: widget.apiClient,
         tasks: availableTasks,
         onLogout: widget.onLogout,
@@ -1193,6 +1456,9 @@ class _TaskPageState extends State<TaskPage> {
           });
         },
       );
+      return _useAndroidUi
+          ? RefreshIndicator(onRefresh: _refreshPomodoroTab, child: view)
+          : view;
     }
 
     if (isCalendar) {
@@ -1204,7 +1470,7 @@ class _TaskPageState extends State<TaskPage> {
         'month' => CalendarMode.month,
         _ => CalendarMode.week,
       };
-      return CalendarView(
+      final view = CalendarView(
         tasks: _applySearch(visibleTasks),
         loading: _loading,
         saving: _saving,
@@ -1218,6 +1484,9 @@ class _TaskPageState extends State<TaskPage> {
         onToggleTask: _toggleTask,
         onOpenTask: _openTaskDetailFromCalendar,
       );
+      return _useAndroidUi
+          ? RefreshIndicator(onRefresh: _refreshCalendarTab, child: view)
+          : view;
     }
 
     if (isStats) {
@@ -1229,7 +1498,7 @@ class _TaskPageState extends State<TaskPage> {
           pomodoroSummary: _pomodoroSummary,
           pomodoroSessions: _pomodoroSessions,
           loading: _loadingStats,
-          onRefresh: _loadTimeStats,
+          onRefresh: _refreshStatsTab,
         ),
       );
     }
@@ -1347,7 +1616,7 @@ class _TaskPageState extends State<TaskPage> {
 
     final grid = LayoutBuilder(
       builder: (context, constraints) {
-        final isNarrow = constraints.maxWidth < 900;
+        final isNarrow = _useAndroidUi || constraints.maxWidth < 900;
 
         Widget panel({
           required String title,
@@ -1373,33 +1642,33 @@ class _TaskPageState extends State<TaskPage> {
           subtitle: '马上做',
           targetPriority: 4,
           items: q1,
-          accent: AppColors.accentDeep,
+          accent: _matrixQuadrantAccent(4),
         );
         final q2Panel = panel(
           title: 'Q2 重要不紧急',
           subtitle: '计划做',
           targetPriority: 3,
           items: q2,
-          accent: AppColors.accentCool,
+          accent: _matrixQuadrantAccent(3),
         );
         final q3Panel = panel(
           title: 'Q3 紧急不重要',
           subtitle: '尽快做 / 可委托',
           targetPriority: 2,
           items: q3,
-          accent: AppColors.accent,
+          accent: _matrixQuadrantAccent(2),
         );
         final q4Panel = panel(
           title: 'Q4 不重要不紧急',
           subtitle: unsetCount > 0 ? '低优先级 · 未设置 $unsetCount' : '低优先级',
           targetPriority: 1,
           items: q4,
-          accent: AppColors.accentSoft,
+          accent: _matrixQuadrantAccent(1),
         );
 
         if (isNarrow) {
           const panelHeight = 320.0;
-          return ListView(
+          final list = ListView(
             children: [
               SizedBox(height: panelHeight, child: q1Panel),
               const SizedBox(height: 12),
@@ -1410,6 +1679,9 @@ class _TaskPageState extends State<TaskPage> {
               SizedBox(height: panelHeight, child: q4Panel),
             ],
           );
+          return _useAndroidUi
+              ? RefreshIndicator(onRefresh: _refreshMatrixTab, child: list)
+              : list;
         }
 
         return Row(
@@ -1451,10 +1723,12 @@ class _TaskPageState extends State<TaskPage> {
             child: _TaskDetailPanel(
               task: selectedTask,
               saving: _saving,
+              downloadingAttachmentIds: _downloadingAttachmentIds,
               onClose: _clearSelectedTask,
               onToggleSubtask: _toggleSubtask,
               generateSubtaskId: _generateSubtaskId,
               onUpdateTask: _updateTaskFromDetail,
+              onDownloadAttachment: _downloadAttachment,
               onDeleteTask: _moveTaskToTrash,
             ),
           ),
@@ -1467,6 +1741,16 @@ class _TaskPageState extends State<TaskPage> {
     if (raw < 0) return 0;
     if (raw > 4) return 0;
     return raw;
+  }
+
+  Color _matrixQuadrantAccent(int priority) {
+    const urgent = Color(0xFFE5484D);
+    const relaxed = Color(0xFF22C55E);
+    var p = priority;
+    if (p < 1) p = 1;
+    if (p > 4) p = 4;
+    final t = (4 - p) / 3;
+    return Color.lerp(urgent, relaxed, t)!;
   }
 
   Widget _buildMatrixQuadrantPanel(
@@ -1493,9 +1777,12 @@ class _TaskPageState extends State<TaskPage> {
         final highlight = candidateData.isNotEmpty;
         final borderColor =
             highlight ? accent.withOpacity(0.85) : AppColors.outline;
-        final headerColor = highlight
-            ? accent.withOpacity(0.10)
-            : AppColors.surface.withOpacity(0.92);
+        final headerTint =
+            Color.lerp(AppColors.surface, accent, highlight ? 0.18 : 0.10)!;
+        final headerColor = headerTint.withOpacity(0.92);
+        final bgStart = Color.lerp(AppColors.surface, accent, 0.06)!;
+        final bgEnd =
+            Color.lerp(AppColors.surface, accent, highlight ? 0.26 : 0.16)!;
 
         return Material(
           elevation: highlight ? 4 : 2,
@@ -1512,8 +1799,8 @@ class _TaskPageState extends State<TaskPage> {
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
                 colors: [
-                  AppColors.surface.withOpacity(0.98),
-                  accent.withOpacity(0.08),
+                  bgStart,
+                  bgEnd,
                 ],
               ),
             ),
@@ -1766,6 +2053,7 @@ class _TaskPageState extends State<TaskPage> {
               Expanded(
                 child: TextField(
                   controller: _quickAddController,
+                  focusNode: _useAndroidUi ? null : _quickAddFocusNode,
                   autofocus: autofocus,
                   enabled: !_saving,
                   decoration: InputDecoration(
@@ -1969,6 +2257,7 @@ class _TaskPageState extends State<TaskPage> {
           Expanded(
             child: TextField(
               controller: _checklistAddController,
+              focusNode: _checklistAddFocusNode,
               enabled: !disabled,
               decoration: InputDecoration(
                 hintText: disabled ? '选择一个清单后添加事项' : '输入清单事项，回车添加',
@@ -2929,6 +3218,37 @@ class _TaskPageState extends State<TaskPage> {
     });
   }
 
+  Future<void> _downloadAttachment(TaskAttachment attachment) async {
+    if (_downloadingAttachmentIds.contains(attachment.id)) return;
+    setState(() => _downloadingAttachmentIds.add(attachment.id));
+    try {
+      final bytes =
+          await widget.apiClient.downloadAttachmentBytes(attachment.id);
+      final ok = await downloadBytesFile(
+        filename: attachment.name,
+        bytes: bytes,
+        mimeType: attachment.mime.trim().isEmpty
+            ? 'application/octet-stream'
+            : attachment.mime.trim(),
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(ok ? '已下载：${attachment.name}' : '已取消下载'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } on UnauthorizedException {
+      widget.onLogout();
+    } catch (e) {
+      _showFailureSnackBar('下载附件失败', e);
+    } finally {
+      if (mounted) {
+        setState(() => _downloadingAttachmentIds.remove(attachment.id));
+      }
+    }
+  }
+
   void _addSubtaskDraft() {
     setState(() {
       _quickAddSubtasksExpanded = true;
@@ -3492,19 +3812,21 @@ class _TaskPageState extends State<TaskPage> {
   }
 
   void _setDefaultStatsRange() {
-    final now = DateTime.now().toUtc();
-    final start = now.subtract(const Duration(days: 6));
-    _statsFrom =
-        DateTime.utc(start.year, start.month, start.day).millisecondsSinceEpoch;
-    _statsTo = now.millisecondsSinceEpoch;
+    const dayMs = 24 * 60 * 60 * 1000;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final offsetMs =
+        widget.userSettings.preferences.timeZoneOffsetMinutes * 60 * 1000;
+    final startOfTodayMs = ((nowMs + offsetMs) ~/ dayMs) * dayMs - offsetMs;
+    _statsFrom = startOfTodayMs - (dayMs * 6);
+    _statsTo = nowMs;
   }
 
   String _statsRangeLabel() {
-    if (_statsFrom == 0 || _statsTo == 0) return '近7天 · UTC';
-    final from = DateTime.fromMillisecondsSinceEpoch(_statsFrom, isUtc: true);
-    final to = DateTime.fromMillisecondsSinceEpoch(_statsTo, isUtc: true);
+    if (_statsFrom == 0 || _statsTo == 0) return '近7天 · 本地';
+    final from = DateTime.fromMillisecondsSinceEpoch(_statsFrom);
+    final to = DateTime.fromMillisecondsSinceEpoch(_statsTo);
     final fmt = DateFormat('M月d日');
-    return '${fmt.format(from)} - ${fmt.format(to)} · UTC';
+    return '${fmt.format(from)} - ${fmt.format(to)} · 本地';
   }
 
   String _formatDuration(int ms) {
@@ -3534,6 +3856,7 @@ class _TaskPageState extends State<TaskPage> {
         _runningEntries = running.where((entry) => entry.isRunning).toList();
         _lastTimeSync = DateTime.now();
       });
+      unawaited(_syncTimeTrackingOngoingNotification());
     } on UnauthorizedException {
       widget.onLogout();
     } catch (_) {
@@ -3553,7 +3876,11 @@ class _TaskPageState extends State<TaskPage> {
         _setDefaultStatsRange();
       }
       final statsFuture =
-          widget.apiClient.getTimeStats(from: _statsFrom, to: _statsTo);
+          widget.apiClient.getTimeStats(
+            from: _statsFrom,
+            to: _statsTo,
+            tzOffsetMinutes: widget.userSettings.preferences.timeZoneOffsetMinutes,
+          );
       final summaryFuture = widget.apiClient.getPomodoroSummary(days: 14);
       final sessionsFuture = widget.apiClient.getPomodoroSessions(limit: 200);
       final stats = await statsFuture;
@@ -3600,22 +3927,20 @@ class _TaskPageState extends State<TaskPage> {
           ? await widget.apiClient.createActivity(
               name: draft.name,
               taskId: draft.taskId,
-              icon: draft.icon,
-              color: draft.color,
-              category: draft.category,
-              goal: draft.goal,
-              note: draft.note,
-            )
-          : await widget.apiClient.updateActivity(
-              activity.id,
-              name: draft.name,
-              taskId: draft.taskId,
-              icon: draft.icon,
-              color: draft.color,
-              category: draft.category,
-              goal: draft.goal,
-              note: draft.note,
-            );
+               icon: draft.icon,
+               color: draft.color,
+               category: draft.category,
+               note: draft.note,
+             )
+           : await widget.apiClient.updateActivity(
+               activity.id,
+               name: draft.name,
+               taskId: draft.taskId,
+               icon: draft.icon,
+               color: draft.color,
+               category: draft.category,
+               note: draft.note,
+             );
       final next = [..._activities];
       final index = next.indexWhere((item) => item.id == updated.id);
       if (index == -1) {
@@ -3695,6 +4020,7 @@ class _TaskPageState extends State<TaskPage> {
       }
       _lastTimeSync = DateTime.now();
     });
+    unawaited(_syncTimeTrackingOngoingNotification());
 
     try {
       final stopped = running.isEmpty
@@ -3713,6 +4039,7 @@ class _TaskPageState extends State<TaskPage> {
           _timeEntries = _mergeTimeEntries(_timeEntries, stopped);
           _lastTimeSync = DateTime.now();
         });
+        unawaited(_syncTimeTrackingOngoingNotification());
         return;
       }
 
@@ -3733,6 +4060,7 @@ class _TaskPageState extends State<TaskPage> {
         _timeEntries = _mergeTimeEntries(_timeEntries, [entry]);
         _lastTimeSync = DateTime.now();
       });
+      unawaited(_syncTimeTrackingOngoingNotification());
     } on UnauthorizedException {
       widget.onLogout();
     } catch (_) {
@@ -3741,11 +4069,71 @@ class _TaskPageState extends State<TaskPage> {
         _runningEntries = previousRunning;
         _timeEntries = previousEntries;
       });
+      unawaited(_syncTimeTrackingOngoingNotification());
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('计时操作失败。')),
       );
     } finally {
       if (mounted) setState(() => _savingTime = false);
+    }
+  }
+
+  void _openTimeStatsSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (context) => FractionallySizedBox(
+        heightFactor: 0.92,
+        child: TimeStatsSheet(
+          apiClient: widget.apiClient,
+          activities: _activities.where((activity) => activity.deletedAt == null).toList(),
+          tzOffsetMinutes: widget.userSettings.preferences.timeZoneOffsetMinutes,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openTimeGoalEditor(TimeActivity activity) async {
+    final tzOffsetMinutes = widget.userSettings.preferences.timeZoneOffsetMinutes;
+    TimeGoalsSnapshot? snapshot;
+    try {
+      snapshot = await widget.apiClient.getTimeGoals(
+        tzOffsetMinutes: tzOffsetMinutes,
+      );
+    } on UnauthorizedException {
+      widget.onLogout();
+      return;
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('加载目标失败。')),
+      );
+    }
+
+    final result = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (context) => FractionallySizedBox(
+        heightFactor: 0.92,
+        child: TimeGoalEditorSheet(
+          apiClient: widget.apiClient,
+          activities: _activities.where((a) => a.deletedAt == null).toList(),
+          existingGoals: snapshot?.goals ?? const <TimeGoalItem>[],
+          initialActivityId: activity.id,
+        ),
+      ),
+    );
+
+    if (result == true) {
+      // Goals are loaded on-demand in stats views; nothing to refresh here yet.
     }
   }
 
@@ -4055,7 +4443,7 @@ class _TaskPageState extends State<TaskPage> {
 
     final now = DateTime.now();
     final todayStr = _dateFormatter.format(now);
-    final next7Str = _dateFormatter.format(now.add(const Duration(days: 7)));
+    final weekEndStr = _dateFormatter.format(_weekEndDate(now));
 
     switch (target) {
       case TaskFilter.today:
@@ -4069,7 +4457,7 @@ class _TaskPageState extends State<TaskPage> {
       case TaskFilter.next7:
         await _updateTaskFromDetail(
           task,
-          dueDate: next7Str,
+          dueDate: weekEndStr,
           inbox: false,
           status: 'todo',
         );
@@ -4537,10 +4925,12 @@ class _TaskPageState extends State<TaskPage> {
                 child: _TaskDetailPanel(
                   task: sheetTask,
                   saving: _saving,
+                  downloadingAttachmentIds: _downloadingAttachmentIds,
                   onClose: () => Navigator.of(sheetContext).pop(),
                   onToggleSubtask: _toggleSubtask,
                   generateSubtaskId: _generateSubtaskId,
                   onUpdateTask: handleUpdate,
+                  onDownloadAttachment: _downloadAttachment,
                   onDeleteTask: _moveTaskToTrash,
                 ),
               );
@@ -4669,16 +5059,50 @@ class _TaskPageState extends State<TaskPage> {
     };
   }
 
+  int _weekStartWeekday() {
+    switch (widget.userSettings.preferences.weekStart.trim().toLowerCase()) {
+      case 'monday':
+        return DateTime.monday;
+      case 'tuesday':
+        return DateTime.tuesday;
+      case 'wednesday':
+        return DateTime.wednesday;
+      case 'thursday':
+        return DateTime.thursday;
+      case 'friday':
+        return DateTime.friday;
+      case 'saturday':
+        return DateTime.saturday;
+      case 'sunday':
+        return DateTime.sunday;
+      default:
+        return DateTime.monday;
+    }
+  }
+
+  DateTime _dateOnly(DateTime value) => DateTime(value.year, value.month, value.day);
+
+  DateTime _weekStartDate(DateTime now) {
+    final date = _dateOnly(now);
+    final startWeekday = _weekStartWeekday();
+    final delta = (date.weekday - startWeekday + 7) % 7;
+    return date.subtract(Duration(days: delta));
+  }
+
+  DateTime _weekEndDate(DateTime now) =>
+      _weekStartDate(now).add(const Duration(days: 6));
+
   List<Task> _applyFilter(List<Task> tasks, TaskFilter filter) {
-    final today = DateTime.now();
-    final todayStr = _dateFormatter.format(today);
-    final weekEnd = today.add(const Duration(days: 7));
+    final now = DateTime.now();
+    final todayStr = _dateFormatter.format(now);
+    final weekStart = _weekStartDate(now);
+    final weekEnd = weekStart.add(const Duration(days: 6));
 
     bool isWithinWeek(Task task) {
       if (task.dueDate.trim().isEmpty) return false;
       try {
         final date = _dateFormatter.parse(task.dueDate);
-        return !date.isBefore(today) && !date.isAfter(weekEnd);
+        return !date.isBefore(weekStart) && !date.isAfter(weekEnd);
       } catch (_) {
         return false;
       }
@@ -4729,17 +5153,188 @@ class _TaskPageState extends State<TaskPage> {
     return trashed;
   }
 
+  DateTime? _parseDateKey(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return null;
+    try {
+      return _dateFormatter.parseStrict(trimmed);
+    } catch (_) {
+      return DateTime.tryParse('${trimmed}T00:00:00');
+    }
+  }
+
+  DateTime? _taskDeadlineAt(Task task) {
+    final startDay = _parseDateKey(task.dueDate);
+    final endRaw = task.endTime.trim();
+
+    DateTime? endDay;
+    final endDateKey = task.endDate.trim();
+    if (endDateKey.isNotEmpty) {
+      endDay = _parseDateKey(endDateKey);
+    }
+    if (startDay != null && endDay != null && endDay.isBefore(startDay)) {
+      endDay = startDay;
+    }
+
+    if (endDay == null) {
+      if (startDay == null) return null;
+      endDay = startDay;
+
+      if (endRaw.isNotEmpty) {
+        final plusIndex = endRaw.lastIndexOf('+');
+        final hasExplicitOffset = plusIndex > 0;
+        final explicitOffset = hasExplicitOffset
+            ? (int.tryParse(endRaw.substring(plusIndex + 1).trim()) ?? 0)
+            : 0;
+        if (explicitOffset > 0) {
+          endDay = startDay.add(Duration(days: explicitOffset));
+        } else {
+          final legacyOffset = _parseEndOffsetDays(endRaw);
+          if (legacyOffset > 0) {
+            endDay = startDay.add(Duration(days: legacyOffset));
+          }
+        }
+      }
+    }
+
+    final endMinutesFallback = 24 * 60;
+    int endMinutes = endMinutesFallback;
+    String timePart = '24:00';
+    if (endRaw.isNotEmpty) {
+      final plusIndex = endRaw.lastIndexOf('+');
+      final hasExplicitOffset = plusIndex > 0;
+      timePart = (hasExplicitOffset ? endRaw.substring(0, plusIndex) : endRaw).trim();
+      endMinutes = _parseTimeMinutes(timePart) ?? endMinutesFallback;
+    }
+
+    if (endMinutes == 24 * 60 || timePart == '24:00') {
+      endMinutes = 0;
+      endDay = endDay.add(const Duration(days: 1));
+    } else if (startDay != null) {
+      final startMinutes = _parseTimeMinutes(task.startTime) ?? 0;
+      if (endDay.year == startDay.year &&
+          endDay.month == startDay.month &&
+          endDay.day == startDay.day &&
+          endMinutes <= startMinutes) {
+        endDay = endDay.add(const Duration(days: 1));
+      }
+    }
+
+    return DateTime(
+      endDay.year,
+      endDay.month,
+      endDay.day,
+      endMinutes ~/ 60,
+      endMinutes % 60,
+    );
+  }
+
+  int _compareTaskRecency(Task a, Task b) {
+    final updatedCompare = b.updatedAt.compareTo(a.updatedAt);
+    if (updatedCompare != 0) return updatedCompare;
+    return a.id.compareTo(b.id);
+  }
+
+  int _compareTaskStart(
+    Task a,
+    Task b, {
+    required bool ascending,
+  }) {
+    final aDay = a.dueDate.trim();
+    final bDay = b.dueDate.trim();
+    final aHasDay = aDay.isNotEmpty;
+    final bHasDay = bDay.isNotEmpty;
+    if (aHasDay != bHasDay) return aHasDay ? -1 : 1;
+    if (aHasDay && bHasDay) {
+      final dayCompare = aDay.compareTo(bDay);
+      if (dayCompare != 0) return ascending ? dayCompare : -dayCompare;
+    }
+
+    final aStartMinutes = _parseTimeMinutes(a.startTime);
+    final bStartMinutes = _parseTimeMinutes(b.startTime);
+    final aHasTime = aStartMinutes != null;
+    final bHasTime = bStartMinutes != null;
+    if (aHasTime != bHasTime) return aHasTime ? -1 : 1;
+    if (aHasTime && bHasTime) {
+      final timeCompare = aStartMinutes!.compareTo(bStartMinutes!);
+      if (timeCompare != 0) return ascending ? timeCompare : -timeCompare;
+    }
+
+    return _compareTaskRecency(a, b);
+  }
+
+  int _compareTaskDeadline(
+    Task a,
+    Task b, {
+    required bool ascending,
+  }) {
+    final aEnd = _taskDeadlineAt(a);
+    final bEnd = _taskDeadlineAt(b);
+    final aHas = aEnd != null;
+    final bHas = bEnd != null;
+    if (aHas != bHas) return aHas ? -1 : 1;
+    if (aHas && bHas) {
+      final cmp = aEnd!.compareTo(bEnd!);
+      if (cmp != 0) return ascending ? cmp : -cmp;
+    }
+
+    final startCompare = _compareTaskStart(a, b, ascending: true);
+    if (startCompare != 0) return startCompare;
+    return _compareTaskRecency(a, b);
+  }
+
+  int _compareTaskPriority(Task a, Task b) {
+    final aPriority = _normalizeMatrixPriority(a.priority);
+    final bPriority = _normalizeMatrixPriority(b.priority);
+    final aUnset = aPriority == 0;
+    final bUnset = bPriority == 0;
+    if (aUnset != bUnset) return aUnset ? 1 : -1;
+    if (aPriority != bPriority) return bPriority.compareTo(aPriority);
+
+    final deadlineCompare = _compareTaskDeadline(a, b, ascending: true);
+    if (deadlineCompare != 0) return deadlineCompare;
+    return _compareTaskRecency(a, b);
+  }
+
   int _sortTask(Task a, Task b) {
     if (a.isCompleted != b.isCompleted) {
       return a.isCompleted ? 1 : -1;
     }
-    if (a.dueDate.isEmpty && b.dueDate.isNotEmpty) return 1;
-    if (a.dueDate.isNotEmpty && b.dueDate.isEmpty) return -1;
-    if (a.dueDate.isNotEmpty && b.dueDate.isNotEmpty) {
-      final dateCompare = a.dueDate.compareTo(b.dueDate);
-      if (dateCompare != 0) return dateCompare;
+
+    return switch (_taskSortMode) {
+      _TaskSortMode.priority => _compareTaskPriority(a, b),
+      _TaskSortMode.startAsc => _compareTaskStart(a, b, ascending: true),
+      _TaskSortMode.startDesc => _compareTaskStart(a, b, ascending: false),
+      _TaskSortMode.deadlineAsc =>
+        _compareTaskDeadline(a, b, ascending: true),
+      _TaskSortMode.deadlineDesc =>
+        _compareTaskDeadline(a, b, ascending: false),
+    };
+  }
+}
+
+enum _TaskSortMode {
+  priority,
+  startAsc,
+  startDesc,
+  deadlineAsc,
+  deadlineDesc,
+}
+
+extension _TaskSortModeLabel on _TaskSortMode {
+  String get label {
+    switch (this) {
+      case _TaskSortMode.priority:
+        return '优先级';
+      case _TaskSortMode.startAsc:
+        return '开始时间↑';
+      case _TaskSortMode.startDesc:
+        return '开始时间↓';
+      case _TaskSortMode.deadlineAsc:
+        return '截止时间↑';
+      case _TaskSortMode.deadlineDesc:
+        return '截止时间↓';
     }
-    return b.updatedAt.compareTo(a.updatedAt);
   }
 }
 
@@ -5579,19 +6174,23 @@ class _TaskDetailPanel extends StatelessWidget {
   const _TaskDetailPanel({
     required this.task,
     required this.saving,
+    required this.downloadingAttachmentIds,
     required this.onClose,
     required this.onToggleSubtask,
     required this.generateSubtaskId,
     required this.onUpdateTask,
+    required this.onDownloadAttachment,
     this.onDeleteTask,
   });
 
   final Task? task;
   final bool saving;
+  final Set<String> downloadingAttachmentIds;
   final VoidCallback onClose;
   final void Function(Task task, TaskSubtask subtask) onToggleSubtask;
   final String Function() generateSubtaskId;
   final TaskUpdateCallback onUpdateTask;
+  final Future<void> Function(TaskAttachment attachment) onDownloadAttachment;
   final Future<bool> Function(Task task)? onDeleteTask;
 
   int? _parseTimeMinutes(String value) {
@@ -6675,11 +7274,43 @@ class _TaskDetailPanel extends StatelessWidget {
           ...attachments.map(
             (attachment) => Padding(
               padding: const EdgeInsets.only(bottom: 4),
-              child: Text(
-                '${attachment.name} · ${_formatSize(attachment.size)}',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: AppColors.inkSoft,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: InkWell(
+                      onTap: saving ||
+                              downloadingAttachmentIds.contains(attachment.id)
+                          ? null
+                          : () => onDownloadAttachment(attachment),
+                      child: Text(
+                        '${attachment.name} · ${_formatSize(attachment.size)}',
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: AppColors.inkSoft,
+                            ),
+                      ),
                     ),
+                  ),
+                  const SizedBox(width: 8),
+                  if (downloadingAttachmentIds.contains(attachment.id))
+                    const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  else
+                    IconButton(
+                      onPressed:
+                          saving ? null : () => onDownloadAttachment(attachment),
+                      icon: const Icon(Icons.download_rounded, size: 18),
+                      tooltip: '下载',
+                      constraints: const BoxConstraints(
+                        minWidth: 36,
+                        minHeight: 36,
+                      ),
+                      padding: EdgeInsets.zero,
+                    ),
+                ],
               ),
             ),
           ),
@@ -6872,4 +7503,16 @@ class _UndoAction {
 
   final String message;
   final Future<void> Function() onUndo;
+}
+
+class _NewTaskIntent extends Intent {
+  const _NewTaskIntent({required this.allowWhenEditing});
+
+  final bool allowWhenEditing;
+}
+
+class _SearchTasksIntent extends Intent {
+  const _SearchTasksIntent({required this.allowWhenEditing});
+
+  final bool allowWhenEditing;
 }

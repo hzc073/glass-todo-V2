@@ -14,6 +14,7 @@ class ShellRouter extends StatelessWidget {
     required this.username,
     required this.apiClient,
     required this.userSettings,
+    required this.timeTrackingOngoingNotificationEnabled,
     required this.onLogout,
     required this.onOpenSettings,
   });
@@ -22,6 +23,7 @@ class ShellRouter extends StatelessWidget {
   final String username;
   final ApiClient apiClient;
   final UserSettings userSettings;
+  final bool timeTrackingOngoingNotificationEnabled;
   final VoidCallback onLogout;
   final VoidCallback onOpenSettings;
 
@@ -37,6 +39,8 @@ class ShellRouter extends StatelessWidget {
         username: username,
         apiClient: apiClient,
         userSettings: userSettings,
+        timeTrackingOngoingNotificationEnabled:
+            timeTrackingOngoingNotificationEnabled,
         onLogout: onLogout,
         onOpenSettings: onOpenSettings,
         initialWorkspace: initialWorkspace,
@@ -49,6 +53,8 @@ class ShellRouter extends StatelessWidget {
         username: username,
         apiClient: apiClient,
         userSettings: userSettings,
+        timeTrackingOngoingNotificationEnabled:
+            timeTrackingOngoingNotificationEnabled,
         onLogout: onLogout,
         onOpenSettings: onOpenSettings,
         initialWorkspace: initialWorkspace,
@@ -60,6 +66,7 @@ class ShellRouter extends StatelessWidget {
       username: username,
       apiClient: apiClient,
       userSettings: userSettings,
+      timeTrackingOngoingNotificationEnabled: timeTrackingOngoingNotificationEnabled,
       onLogout: onLogout,
       onOpenSettings: onOpenSettings,
       initialWorkspace: initialWorkspace,
@@ -83,4 +90,3 @@ WorkspaceView _workspaceForDefaultView(String raw) {
       return WorkspaceView.tasks;
   }
 }
-

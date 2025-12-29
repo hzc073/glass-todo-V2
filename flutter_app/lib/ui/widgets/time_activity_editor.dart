@@ -1,5 +1,7 @@
 ﻿import 'package:flutter/material.dart';
 
+import 'package:emoji_picker_flutter/emoji_picker_flutter.dart';
+
 import '../../models/task.dart';
 import '../../models/time_activity.dart';
 import '../app_theme.dart';
@@ -11,7 +13,6 @@ class TimeActivityDraft {
     this.icon,
     this.color,
     this.category,
-    this.goal,
     this.note,
   });
 
@@ -20,7 +21,6 @@ class TimeActivityDraft {
   final String? icon;
   final String? color;
   final String? category;
-  final String? goal;
   final String? note;
 }
 
@@ -42,7 +42,6 @@ class _TimeActivityEditorSheetState extends State<TimeActivityEditorSheet> {
   late final TextEditingController _nameController;
   late final TextEditingController _iconController;
   late final TextEditingController _categoryController;
-  late final TextEditingController _goalController;
   late final TextEditingController _noteController;
   late String _selectedTaskId;
   late String _selectedColor;
@@ -74,13 +73,62 @@ class _TimeActivityEditorSheetState extends State<TimeActivityEditorSheet> {
     '#111827',
   ];
 
+  Future<void> _openEmojiPicker(BuildContext context) async {
+    final surface = Theme.of(context).colorScheme.surface;
+    final height = MediaQuery.of(context).size.height * 0.6;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (sheetContext) => SafeArea(
+        child: SizedBox(
+          height: height,
+          child: EmojiPicker(
+            onEmojiSelected: (category, emoji) {
+              _iconController.text = emoji.emoji;
+              _iconController.selection = TextSelection.collapsed(
+                offset: _iconController.text.length,
+              );
+              Navigator.of(sheetContext).maybePop();
+            },
+            config: Config(
+              height: height,
+              emojiViewConfig: EmojiViewConfig(
+                backgroundColor: surface,
+                columns: 8,
+                emojiSizeMax: 30,
+                gridPadding: const EdgeInsets.symmetric(horizontal: 8),
+              ),
+              categoryViewConfig: const CategoryViewConfig(
+                dividerColor: Colors.transparent,
+              ),
+              bottomActionBarConfig: BottomActionBarConfig(
+                showBackspaceButton: false,
+                backgroundColor: surface,
+                buttonColor: AppColors.accent,
+                buttonIconColor: Colors.white,
+              ),
+              searchViewConfig: SearchViewConfig(
+                backgroundColor: surface,
+                hintText: '搜索表情',
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
     _nameController = TextEditingController(text: widget.activity?.name ?? '');
     _iconController = TextEditingController(text: widget.activity?.icon ?? '');
     _categoryController = TextEditingController(text: widget.activity?.category ?? '');
-    _goalController = TextEditingController(text: widget.activity?.goal ?? '');
     _noteController = TextEditingController(text: widget.activity?.note ?? '');
     _selectedColor = widget.activity?.color ?? '';
     final initialTaskId = widget.activity?.taskId ?? '';
@@ -97,7 +145,6 @@ class _TimeActivityEditorSheetState extends State<TimeActivityEditorSheet> {
     _nameController.dispose();
     _iconController.dispose();
     _categoryController.dispose();
-    _goalController.dispose();
     _noteController.dispose();
     super.dispose();
   }
@@ -165,7 +212,14 @@ class _TimeActivityEditorSheetState extends State<TimeActivityEditorSheet> {
           const SizedBox(height: 12),
           TextField(
             controller: _iconController,
-            decoration: const InputDecoration(labelText: '图标（表情）'),
+            decoration: InputDecoration(
+              labelText: '图标（表情）',
+              suffixIcon: IconButton(
+                tooltip: '选择表情',
+                onPressed: () => _openEmojiPicker(context),
+                icon: const Icon(Icons.emoji_emotions_outlined),
+              ),
+            ),
           ),
           const SizedBox(height: 10),
           Wrap(
@@ -249,11 +303,6 @@ class _TimeActivityEditorSheetState extends State<TimeActivityEditorSheet> {
               ),
               const SizedBox(height: 12),
               TextField(
-                controller: _goalController,
-                decoration: const InputDecoration(labelText: '目标'),
-              ),
-              const SizedBox(height: 12),
-              TextField(
                 controller: _noteController,
                 maxLines: 4,
                 decoration: const InputDecoration(labelText: '备注'),
@@ -299,7 +348,6 @@ class _TimeActivityEditorSheetState extends State<TimeActivityEditorSheet> {
         icon: _iconController.text.trim(),
         color: _selectedColor.trim(),
         category: _categoryController.text.trim(),
-        goal: _goalController.text.trim(),
         note: _noteController.text.trim(),
       ),
     );

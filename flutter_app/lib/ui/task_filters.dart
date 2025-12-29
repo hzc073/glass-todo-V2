@@ -11,7 +11,7 @@ extension TaskFilterLabel on TaskFilter {
       case TaskFilter.today:
         return '今天';
       case TaskFilter.next7:
-        return '未来七天';
+        return '本周';
       case TaskFilter.inbox:
         return '收集箱';
       case TaskFilter.done:
@@ -24,7 +24,7 @@ extension TaskFilterLabel on TaskFilter {
       case TaskFilter.today:
         return '今日专注清单。';
       case TaskFilter.next7:
-        return '一周安排一览。';
+        return '本周安排一览。';
       case TaskFilter.inbox:
         return '未整理的记录与灵感。';
       case TaskFilter.done:

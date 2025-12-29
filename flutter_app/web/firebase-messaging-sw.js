@@ -19,7 +19,7 @@ function resolveNotification(payload) {
   const notification = payload.notification || {};
   const data = payload.data || payload || {};
 
-  const title = notification.title || data.title || 'Glass Todo';
+  const title = notification.title || data.title || 'Glass-ToDo';
   const body = notification.body || data.body || '';
   const url = data.url || '/';
   const tag = notification.tag || data.tag || 'glass-todo';
@@ -62,4 +62,3 @@ self.addEventListener('notificationclick', function (event) {
       }),
   );
 });
-

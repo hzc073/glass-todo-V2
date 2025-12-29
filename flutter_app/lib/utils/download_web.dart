@@ -10,6 +10,14 @@ Future<bool> downloadTextFile({
   String mimeType = 'application/octet-stream',
 }) async {
   final bytes = Uint8List.fromList(utf8.encode(content));
+  return downloadBytesFile(filename: filename, bytes: bytes, mimeType: mimeType);
+}
+
+Future<bool> downloadBytesFile({
+  required String filename,
+  required Uint8List bytes,
+  String mimeType = 'application/octet-stream',
+}) async {
   final blob = html.Blob([bytes], mimeType);
   final url = html.Url.createObjectUrlFromBlob(blob);
   final anchor = html.AnchorElement(href: url)

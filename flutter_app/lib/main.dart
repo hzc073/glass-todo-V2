@@ -3,14 +3,21 @@ import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import 'core/api_client.dart';
 import 'core/app_config.dart';
 import 'core/app_settings.dart';
 import 'core/auth_store.dart';
+import 'core/notifications/fcm_message_notifications.dart';
 import 'core/notifications/fcm_notification_controller.dart';
+import 'core/notifications/local_notifications.dart';
+import 'core/notifications/time_tracking_notifications.dart';
+import 'core/time_tracking_refresh_bus.dart';
+import 'models/time_activity.dart';
 import 'models/user_settings.dart';
 import 'shells/shell_router.dart';
 import 'ui/app_theme.dart';
@@ -21,6 +28,9 @@ import 'utils/download.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+    FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+  }
   final config = await AppConfig.load();
   final authStore = await AuthStore.load();
   final settings = await AppSettings.load();
@@ -52,10 +62,13 @@ class _GlassTodoAppState extends State<GlassTodoApp> {
   Key _taskPageKey = UniqueKey();
   UserSettings _userSettings = UserSettings.defaults();
   ThemeMode _themeMode = ThemeMode.system;
+  late bool _timeTrackingOngoingNotificationEnabled;
 
   bool _fcmHandlersBound = false;
   StreamSubscription<RemoteMessage>? _fcmForegroundSub;
   StreamSubscription<RemoteMessage>? _fcmOpenedSub;
+  bool _localNotificationsBound = false;
+  bool _handlingTimeTrackingNotificationAction = false;
 
   @override
   void initState() {
@@ -64,6 +77,9 @@ class _GlassTodoAppState extends State<GlassTodoApp> {
         widget.settings.apiBaseUrlOverride ?? widget.config.apiBaseUrl;
     _apiClient = ApiClient(baseUrl: _apiBaseUrl, authStore: widget.authStore);
     _fcmController = FcmNotificationController(apiClient: _apiClient);
+    _timeTrackingOngoingNotificationEnabled =
+        widget.settings.timeTrackingOngoingNotificationEnabled;
+    unawaited(_bindLocalNotifications());
     if (widget.authStore.isLoggedIn) {
       _loadUserSettings();
     }
@@ -92,6 +108,8 @@ class _GlassTodoAppState extends State<GlassTodoApp> {
               username: widget.authStore.username ?? '用户',
               apiClient: _apiClient,
               userSettings: _userSettings,
+              timeTrackingOngoingNotificationEnabled:
+                  _timeTrackingOngoingNotificationEnabled,
               onLogout: _handleLogout,
               onOpenSettings: _openAppSettings,
             )
@@ -197,6 +215,89 @@ class _GlassTodoAppState extends State<GlassTodoApp> {
     unawaited(FirebaseMessaging.instance.getInitialMessage().then((_) {}));
   }
 
+  Future<void> _bindLocalNotifications() async {
+    if (_localNotificationsBound) return;
+    _localNotificationsBound = true;
+
+    final ready = await LocalNotifications.instance.ensureInitialized(
+      onDidReceiveNotificationResponse: _handleLocalNotificationResponse,
+    );
+    if (!ready) return;
+
+    final launchDetails = await LocalNotifications.instance.plugin
+        .getNotificationAppLaunchDetails();
+    final response = launchDetails?.notificationResponse;
+    if (launchDetails?.didNotificationLaunchApp == true && response != null) {
+      unawaited(_handleLocalNotificationResponse(response));
+    }
+  }
+
+  Future<void> _handleLocalNotificationResponse(
+    NotificationResponse response,
+  ) async {
+    final actionId = response.actionId;
+    if (!TimeTrackingNotifications.instance.isTimeTrackingAction(actionId)) {
+      return;
+    }
+
+    if (_handlingTimeTrackingNotificationAction) return;
+    _handlingTimeTrackingNotificationAction = true;
+
+    try {
+      if (!widget.authStore.isLoggedIn) {
+        await TimeTrackingNotifications.instance.cancelOngoing();
+        return;
+      }
+
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      final switchActivityId =
+          TimeTrackingNotifications.instance.switchActivityIdFromAction(actionId);
+
+      final running = await _apiClient.getRunningEntries();
+      if (running.isNotEmpty) {
+        await Future.wait(
+          running.map((entry) => _apiClient.stopEntry(entry.id, endedAt: nowMs)),
+        );
+      }
+
+      if (actionId == TimeTrackingNotifications.actionStop) {
+        await TimeTrackingNotifications.instance.cancelOngoing();
+      } else if (switchActivityId != null) {
+        final entry = await _apiClient.startEntry(
+          activityId: switchActivityId,
+          startedAt: nowMs,
+        );
+
+        final activities = await _apiClient.getActivities();
+        TimeActivity? activity;
+        for (final item in activities) {
+          if (item.deletedAt != null) continue;
+          if (item.id == switchActivityId) {
+            activity = item;
+            break;
+          }
+        }
+
+        await TimeTrackingNotifications.instance.syncOngoing(
+          enabled: _timeTrackingOngoingNotificationEnabled,
+          runningEntry: entry,
+          runningActivity: activity,
+          activities: activities,
+        );
+      }
+
+      TimeTrackingRefreshBus.instance.notify();
+    } catch (_) {
+      final ctx = _navKey.currentContext;
+      if (ctx == null) return;
+      ScaffoldMessenger.of(ctx).showSnackBar(
+        const SnackBar(content: Text('计时操作失败')),
+      );
+    } finally {
+      _handlingTimeTrackingNotificationAction = false;
+    }
+  }
+
   Future<void> _openAppSettings() async {
     final navContext = _navKey.currentContext;
     if (navContext == null) return;
@@ -205,6 +306,13 @@ class _GlassTodoAppState extends State<GlassTodoApp> {
       apiClient: _apiClient,
       username: widget.authStore.username ?? '用户',
       initialSettings: _userSettings,
+      timeTrackingOngoingNotificationEnabled:
+          _timeTrackingOngoingNotificationEnabled,
+      onTimeTrackingOngoingNotificationEnabledChanged: (enabled) async {
+        await widget.settings.setTimeTrackingOngoingNotificationEnabled(enabled);
+        if (!mounted) return;
+        setState(() => _timeTrackingOngoingNotificationEnabled = enabled);
+      },
       onLogout: () => _handleLogout(),
       onSettingsApplied: (settings) {
         setState(() => _userSettings = settings);

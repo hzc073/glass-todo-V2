@@ -1,10 +1,8 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:flutter_timezone/flutter_timezone.dart';
-import 'package:timezone/data/latest.dart' as tz_data;
 import 'package:timezone/timezone.dart' as tz;
 
 import '../../models/task.dart';
+import 'local_notifications.dart';
 
 class LocalTaskNotifications {
   LocalTaskNotifications._();
@@ -16,41 +14,12 @@ class LocalTaskNotifications {
   static const String _channelName = '任务提醒';
   static const String _channelDescription = '任务开始时间提醒';
 
-  final FlutterLocalNotificationsPlugin _plugin =
-      FlutterLocalNotificationsPlugin();
-
-  bool _initialized = false;
-
   Future<bool> ensureInitialized() async {
-    if (kIsWeb) return false;
-    if (_initialized) return true;
-
-    tz_data.initializeTimeZones();
-    try {
-      final tzInfo = await FlutterTimezone.getLocalTimezone();
-      tz.setLocalLocation(tz.getLocation(tzInfo.identifier));
-    } catch (_) {}
-
-    const settingsAndroid =
-        AndroidInitializationSettings('@mipmap/ic_launcher');
-    const settings = InitializationSettings(android: settingsAndroid);
-    await _plugin.initialize(settings);
-
-    _initialized = true;
-    return true;
+    return LocalNotifications.instance.ensureInitialized();
   }
 
   Future<bool> requestPermission() async {
-    final ready = await ensureInitialized();
-    if (!ready) return false;
-    if (defaultTargetPlatform == TargetPlatform.android) {
-      final android =
-          _plugin.resolvePlatformSpecificImplementation<
-              AndroidFlutterLocalNotificationsPlugin>();
-      final granted = await android?.requestNotificationsPermission();
-      return granted ?? true;
-    }
-    return true;
+    return LocalNotifications.instance.requestPermission();
   }
 
   Future<void> showTestNotification() async {
@@ -61,11 +30,13 @@ class LocalTaskNotifications {
         _channelId,
         _channelName,
         channelDescription: _channelDescription,
+        icon: 'ic_notify',
+        largeIcon: DrawableResourceAndroidBitmap('ic_launcher'),
         importance: Importance.high,
         priority: Priority.high,
       ),
     );
-    await _plugin.show(
+    await LocalNotifications.instance.plugin.show(
       0,
       '测试通知',
       '如果你看到这条通知，说明本地通知已正常工作。',
@@ -76,11 +47,12 @@ class LocalTaskNotifications {
   Future<void> cancelAllTaskReminders() async {
     final ready = await ensureInitialized();
     if (!ready) return;
-    final pending = await _plugin.pendingNotificationRequests();
+    final pending =
+        await LocalNotifications.instance.plugin.pendingNotificationRequests();
     for (final item in pending) {
       final payload = item.payload ?? '';
       if (!payload.startsWith(taskReminderPayloadPrefix)) continue;
-      await _plugin.cancel(item.id);
+      await LocalNotifications.instance.plugin.cancel(item.id);
     }
   }
 
@@ -108,12 +80,14 @@ class LocalTaskNotifications {
           _channelId,
           _channelName,
           channelDescription: _channelDescription,
+          icon: 'ic_notify',
+          largeIcon: DrawableResourceAndroidBitmap('ic_launcher'),
           importance: Importance.high,
           priority: Priority.high,
         ),
       );
 
-      await _plugin.zonedSchedule(
+      await LocalNotifications.instance.plugin.zonedSchedule(
         id,
         '开始时间提醒',
         body,

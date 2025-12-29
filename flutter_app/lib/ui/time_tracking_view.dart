@@ -26,6 +26,8 @@ class TimeTrackingView extends StatefulWidget {
     required this.onEditActivity,
     required this.onDeleteActivity,
     this.onEditEntry,
+    this.onOpenStats,
+    this.onOpenGoal,
   });
 
   final List<TimeActivity> activities;
@@ -41,6 +43,8 @@ class TimeTrackingView extends StatefulWidget {
   final Future<void> Function(TimeActivity) onEditActivity;
   final Future<void> Function(TimeActivity) onDeleteActivity;
   final Future<void> Function(TimeEntry entry)? onEditEntry;
+  final VoidCallback? onOpenStats;
+  final void Function(TimeActivity activity)? onOpenGoal;
 
   @override
   State<TimeTrackingView> createState() => _TimeTrackingViewState();
@@ -119,6 +123,7 @@ class _TimeTrackingViewState extends State<TimeTrackingView> {
       syncLabel: syncLabel,
       onAdd: widget.onAddActivity,
       onRefresh: widget.onRefresh,
+      onStats: widget.onOpenStats,
     );
 
     final timerColumn = _TimerColumn(
@@ -136,6 +141,7 @@ class _TimeTrackingViewState extends State<TimeTrackingView> {
       onEditActivity: widget.onEditActivity,
       onDeleteActivity: widget.onDeleteActivity,
       onEditEntry: widget.onEditEntry,
+      onOpenGoal: widget.onOpenGoal,
     );
 
     final recordColumn = _RecordColumn(
@@ -169,6 +175,18 @@ class _TimeTrackingViewState extends State<TimeTrackingView> {
               child: const Icon(Icons.receipt_long),
             ),
           ),
+          if (widget.onOpenStats != null)
+            Positioned(
+              left: 16,
+              bottom: 16 + safeBottom + 56,
+              child: FloatingActionButton.small(
+                heroTag: 'time_tracking_stats_fab',
+                onPressed: widget.onOpenStats,
+                backgroundColor: AppColors.surface,
+                foregroundColor: AppColors.ink,
+                child: const Icon(Icons.bar_chart),
+              ),
+            ),
           Positioned(
             right: 16,
             bottom: 16 + safeBottom,
@@ -229,6 +247,7 @@ class _ActionsRow extends StatelessWidget {
     required this.syncLabel,
     required this.onAdd,
     required this.onRefresh,
+    required this.onStats,
   });
 
   final bool saving;
@@ -236,6 +255,7 @@ class _ActionsRow extends StatelessWidget {
   final String syncLabel;
   final VoidCallback onAdd;
   final Future<void> Function() onRefresh;
+  final VoidCallback? onStats;
 
   @override
   Widget build(BuildContext context) {
@@ -250,10 +270,22 @@ class _ActionsRow extends StatelessWidget {
             label: const Text('添加活动'),
           ),
           const SizedBox(height: 10),
-          OutlinedButton.icon(
-            onPressed: loading ? null : () => onRefresh(),
-            icon: const Icon(Icons.refresh),
-            label: const Text('刷新'),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              OutlinedButton.icon(
+                onPressed: loading ? null : () => onRefresh(),
+                icon: const Icon(Icons.refresh),
+                label: const Text('刷新'),
+              ),
+              if (onStats != null)
+                OutlinedButton.icon(
+                  onPressed: onStats,
+                  icon: const Icon(Icons.bar_chart),
+                  label: const Text('统计'),
+                ),
+            ],
           ),
           const SizedBox(height: 6),
           Text(
@@ -277,6 +309,14 @@ class _ActionsRow extends StatelessWidget {
           icon: const Icon(Icons.refresh),
           label: const Text('刷新'),
         ),
+        if (onStats != null) ...[
+          const SizedBox(width: 12),
+          OutlinedButton.icon(
+            onPressed: onStats,
+            icon: const Icon(Icons.bar_chart),
+            label: const Text('统计'),
+          ),
+        ],
         const SizedBox(width: 16),
         Text(
           syncLabel,
@@ -303,6 +343,7 @@ class _TimerColumn extends StatelessWidget {
     required this.onEditActivity,
     required this.onDeleteActivity,
     required this.onEditEntry,
+    this.onOpenGoal,
   });
 
   final bool saving;
@@ -319,6 +360,7 @@ class _TimerColumn extends StatelessWidget {
   final Future<void> Function(TimeActivity) onEditActivity;
   final Future<void> Function(TimeActivity) onDeleteActivity;
   final Future<void> Function(TimeEntry entry)? onEditEntry;
+  final void Function(TimeActivity activity)? onOpenGoal;
 
   @override
   Widget build(BuildContext context) {
@@ -384,6 +426,7 @@ class _TimerColumn extends StatelessWidget {
                 running: runningActivityIds.contains(activity.id),
                 disabled: saving,
                 onTap: () => onToggleActivity(activity),
+                onGoal: onOpenGoal == null ? null : () => onOpenGoal!(activity),
                 onEdit: () => onEditActivity(activity),
                 onDelete: () => onDeleteActivity(activity),
               ),
@@ -400,7 +443,8 @@ class _TimerColumn extends StatelessWidget {
                 running: runningActivityIds.contains(activity.id),
                 disabled: saving,
                 onTap: () => onToggleActivity(activity),
-                onLongPress: () => onEditActivity(activity),
+                onGoal: onOpenGoal == null ? null : () => onOpenGoal!(activity),
+                onEdit: () => onEditActivity(activity),
                 onDelete: () => onDeleteActivity(activity),
               ),
           ],
@@ -697,16 +741,18 @@ class _ActivityChip extends StatelessWidget {
     required this.running,
     required this.disabled,
     required this.onTap,
-    required this.onLongPress,
+    required this.onEdit,
     required this.onDelete,
+    this.onGoal,
   });
 
   final TimeActivity activity;
   final bool running;
   final bool disabled;
   final VoidCallback onTap;
-  final VoidCallback onLongPress;
+  final VoidCallback onEdit;
   final VoidCallback onDelete;
+  final VoidCallback? onGoal;
 
   @override
   Widget build(BuildContext context) {
@@ -714,6 +760,57 @@ class _ActivityChip extends StatelessWidget {
     final title = activity.name.trim().isEmpty ? '未命名活动' : activity.name.trim();
     final bg = running ? activityColor.withOpacity(0.18) : Colors.white.withOpacity(0.85);
     final border = running ? activityColor.withOpacity(0.8) : AppColors.outline;
+
+    Future<void> openMenu() async {
+      if (disabled) return;
+      final action = await showModalBottomSheet<_ActivityMenuAction>(
+        context: context,
+        showDragHandle: true,
+        builder: (context) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (onGoal != null)
+                ListTile(
+                  leading: const Icon(Icons.flag_outlined),
+                  title: const Text('目标'),
+                  onTap: () {
+                    Navigator.of(context).pop(_ActivityMenuAction.goal);
+                  },
+                ),
+              ListTile(
+                leading: const Icon(Icons.edit),
+                title: const Text('编辑活动'),
+                onTap: () {
+                  Navigator.of(context).pop(_ActivityMenuAction.edit);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.delete_outline),
+                title: const Text('删除活动'),
+                onTap: () {
+                  Navigator.of(context).pop(_ActivityMenuAction.delete);
+                },
+              ),
+              const SizedBox(height: 6),
+            ],
+          ),
+        ),
+      );
+      switch (action) {
+        case _ActivityMenuAction.goal:
+          onGoal?.call();
+          break;
+        case _ActivityMenuAction.edit:
+          onEdit();
+          break;
+        case _ActivityMenuAction.delete:
+          onDelete();
+          break;
+        case null:
+          break;
+      }
+    }
 
     final chip = Container(
       width: 170,
@@ -767,7 +864,7 @@ class _ActivityChip extends StatelessWidget {
           ),
           const SizedBox(width: 6),
           InkWell(
-            onTap: disabled ? null : onDelete,
+            onTap: disabled ? null : openMenu,
             borderRadius: BorderRadius.circular(10),
             child: const Padding(
               padding: EdgeInsets.all(4),
@@ -782,7 +879,7 @@ class _ActivityChip extends StatelessWidget {
       type: MaterialType.transparency,
       child: InkWell(
         onTap: disabled ? null : onTap,
-        onLongPress: disabled ? null : onLongPress,
+        onLongPress: disabled ? null : onEdit,
         borderRadius: BorderRadius.circular(14),
         child: chip,
       ),
@@ -796,6 +893,7 @@ class _ActivitySquareTile extends StatelessWidget {
     required this.running,
     required this.disabled,
     required this.onTap,
+    this.onGoal,
     required this.onEdit,
     required this.onDelete,
   });
@@ -806,6 +904,7 @@ class _ActivitySquareTile extends StatelessWidget {
   final bool running;
   final bool disabled;
   final VoidCallback onTap;
+  final VoidCallback? onGoal;
   final VoidCallback onEdit;
   final VoidCallback onDelete;
 
@@ -825,6 +924,14 @@ class _ActivitySquareTile extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              if (onGoal != null)
+                ListTile(
+                  leading: const Icon(Icons.flag_outlined),
+                  title: const Text('目标'),
+                  onTap: () {
+                    Navigator.of(context).pop(_ActivityMenuAction.goal);
+                  },
+                ),
               ListTile(
                 leading: const Icon(Icons.edit),
                 title: const Text('编辑活动'),
@@ -845,6 +952,9 @@ class _ActivitySquareTile extends StatelessWidget {
         ),
       );
       switch (action) {
+        case _ActivityMenuAction.goal:
+          onGoal?.call();
+          break;
         case _ActivityMenuAction.edit:
           onEdit();
           break;
@@ -941,7 +1051,7 @@ class _ActivitySquareTile extends StatelessWidget {
   }
 }
 
-enum _ActivityMenuAction { edit, delete }
+enum _ActivityMenuAction { goal, edit, delete }
 
 class _AutoFittingText extends StatelessWidget {
   const _AutoFittingText(

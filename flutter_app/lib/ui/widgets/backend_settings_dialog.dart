@@ -42,7 +42,6 @@ class _BackendSettingsDialogState extends State<_BackendSettingsDialog> {
 
   @override
   Widget build(BuildContext context) {
-    const androidEmulatorUrl = 'http://10.0.2.2:3000';
     const localhostUrl = 'http://localhost:3000';
 
     return AlertDialog(
@@ -57,7 +56,7 @@ class _BackendSettingsDialogState extends State<_BackendSettingsDialog> {
               decoration: InputDecoration(
                 labelText: '后端地址',
                 hintText:
-                    'e.g. http://localhost:3000 | Android emulator: http://10.0.2.2:3000',
+                    'e.g. http://localhost:3000',
                 helperText: '留空将使用默认地址',
                 errorText: _errorText,
               ),
@@ -71,23 +70,14 @@ class _BackendSettingsDialogState extends State<_BackendSettingsDialog> {
                 runSpacing: 8,
                 children: [
                   ActionChip(
-                    label: Text(
-                      _isAndroid ? '填入 Android 模拟器默认地址' : '填入 localhost:3000',
-                    ),
+                    label: Text(_isAndroid
+                        ? '填入 localhost:3000（adb reverse）'
+                        : '填入 localhost:3000'),
                     onPressed: () {
-                      _controller.text =
-                          _isAndroid ? androidEmulatorUrl : localhostUrl;
+                      _controller.text = localhostUrl;
                       setState(() => _errorText = null);
                     },
                   ),
-                  if (_isAndroid)
-                    ActionChip(
-                      label: const Text('填入 localhost:3000（adb reverse）'),
-                      onPressed: () {
-                        _controller.text = localhostUrl;
-                        setState(() => _errorText = null);
-                      },
-                    ),
                 ],
               ),
             ),
@@ -122,7 +112,7 @@ class _BackendSettingsDialogState extends State<_BackendSettingsDialog> {
       final hasHost = uri != null && (uri.host.isNotEmpty || uri.path.isNotEmpty);
       if (!isHttp || !hasHost) {
         setState(() => _errorText =
-            '请输入完整地址，例如 http://localhost:3000（Android 模拟器用 http://10.0.2.2:3000）');
+            '请输入完整地址，例如 http://localhost:3000');
         return;
       }
     }

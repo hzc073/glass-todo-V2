@@ -14,7 +14,7 @@ void main() {
       apiBaseUrl: AppConfig.defaultApiBaseUrl,
       useLocalStorage: false,
       holidayJsonUrl: '',
-      appTitle: 'Glass Todo',
+      appTitle: 'Glass-ToDo',
     );
     final authStore = await AuthStore.load();
     final settings = await AppSettings.load();

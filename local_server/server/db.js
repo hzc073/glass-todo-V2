@@ -81,6 +81,23 @@ db.serialize(() => {
     db.run("CREATE INDEX IF NOT EXISTS idx_time_entries_user_time ON time_entries(username, started_at)");
     db.run("CREATE INDEX IF NOT EXISTS idx_time_entries_activity ON time_entries(activity_id)");
 
+    // v2 time goals (per activity)
+    db.run(`CREATE TABLE IF NOT EXISTS time_activity_goals (
+        username TEXT NOT NULL,
+        activity_id TEXT NOT NULL,
+        daily_duration_ms INTEGER,
+        daily_count INTEGER,
+        weekly_duration_ms INTEGER,
+        weekly_count INTEGER,
+        total_duration_ms INTEGER,
+        total_count INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (username, activity_id)
+    )`);
+    db.run("CREATE INDEX IF NOT EXISTS idx_time_activity_goals_user_updated ON time_activity_goals(username, updated_at)");
+    db.run("CREATE INDEX IF NOT EXISTS idx_time_activity_goals_activity ON time_activity_goals(activity_id)");
+
     // 设置表
     db.run(`CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,

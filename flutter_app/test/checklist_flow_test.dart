@@ -44,6 +44,8 @@ class _FakeApiClient extends ApiClient {
       id: _nextChecklistId++,
       name: name,
       owner: 'tester',
+      role: 'owner',
+      canEdit: true,
       sharedCount: 0,
       createdAt: now,
       updatedAt: now,
@@ -63,6 +65,8 @@ class _FakeApiClient extends ApiClient {
     required String title,
     String? notes,
     int? columnId,
+    List<String>? tags,
+    List<ChecklistSubtask>? subtasks,
   }) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     final created = ChecklistItem(
@@ -70,9 +74,12 @@ class _FakeApiClient extends ApiClient {
       listId: listId,
       columnId: null,
       title: title,
+      tags: const <String>[],
       completed: false,
       completedBy: '',
       notes: '',
+      subtasks: const <ChecklistSubtask>[],
+      attachments: const <ChecklistItemAttachment>[],
       createdAt: now,
       updatedAt: now,
     );

@@ -71,6 +71,26 @@ const dbRun = (sql, params = []) => new Promise((resolve, reject) => {
     });
 });
 
+// Simple in-memory rate limiter (best-effort; resets on restart).
+const rateLimiterBuckets = new Map();
+const rateLimit = (key, { windowMs = 60_000, limit = 30 } = {}) => {
+    const now = Date.now();
+    const bucket = rateLimiterBuckets.get(key) || [];
+    const nextBucket = bucket.filter((ts) => now - ts < windowMs);
+    if (nextBucket.length >= limit) {
+        rateLimiterBuckets.set(key, nextBucket);
+        return false;
+    }
+    nextBucket.push(now);
+    rateLimiterBuckets.set(key, nextBucket);
+    return true;
+};
+
+const getRequestIp = (req) => {
+    const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    return forwarded || req.ip || '';
+};
+
 const ensureDir = (dirPath) => {
     if (!fs.existsSync(dirPath)) fs.mkdirSync(dirPath, { recursive: true });
 };
@@ -1051,14 +1071,23 @@ app.post('/api/data', authenticate, (req, res) => {
 });
 
 // Checklists
-const mapChecklistRow = (row = {}) => ({
-    id: Number(row.id),
-    name: row.name || '',
-    owner: row.owner || row.owner_user || row.owner_username || '',
-    sharedCount: Number(row.shared_count || 0),
-    createdAt: row.created_at,
-    updatedAt: row.updated_at
-});
+const mapChecklistRow = (row = {}, currentUser = '') => {
+    const owner = row.owner || row.owner_user || row.owner_username || '';
+    const isOwner = owner === currentUser;
+    const rawCanEdit = row.can_edit_for_user ?? row.canEdit ?? row.can_edit;
+    const canEdit = isOwner ? true : !!Number(rawCanEdit || 0);
+    const role = isOwner ? 'owner' : (canEdit ? 'editor' : 'readonly');
+    return ({
+        id: Number(row.id),
+        name: row.name || '',
+        owner,
+        role,
+        canEdit,
+        sharedCount: Number(row.shared_count || 0),
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+    });
+};
 const normalizeChecklistSubtasks = (input) => {
     let raw = input;
     if (typeof raw === 'string') {
@@ -1091,15 +1120,55 @@ const parseChecklistSubtasks = (raw) => {
         return [];
     }
 };
-const mapChecklistItemRow = (row = {}) => ({
+
+const normalizeChecklistTags = (input) => {
+    let raw = input;
+    if (raw === null || raw === undefined) return [];
+    if (typeof raw === 'string') {
+        const trimmed = raw.trim();
+        if (!trimmed) return [];
+        try {
+            raw = JSON.parse(trimmed);
+        } catch (e) {
+            raw = trimmed.split(/[,，\n]/);
+        }
+    }
+    if (!Array.isArray(raw)) return [];
+
+    const seen = new Set();
+    const tags = [];
+    for (const entry of raw) {
+        const tag = String(entry || '').trim();
+        if (!tag) continue;
+        const normalized = tag.slice(0, 32);
+        const key = normalized.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        tags.push(normalized);
+        if (tags.length >= 20) break;
+    }
+    return tags;
+};
+
+const mapChecklistItemAttachmentRow = (row = {}) => ({
+    id: String(row.id || ''),
+    name: String(row.original_name || ''),
+    mime: String(row.mime_type || ''),
+    size: Number(row.size) || 0,
+    createdAt: Number(row.created_at) || 0
+});
+
+const mapChecklistItemRow = (row = {}, { attachments = null } = {}) => ({
     id: Number(row.id),
     listId: Number(row.list_id),
     columnId: row.column_id === null || row.column_id === undefined ? null : Number(row.column_id),
     title: row.title || '',
+    tags: normalizeChecklistTags(row.tags_json),
     completed: !!row.completed,
     completedBy: row.completed_by || '',
     notes: row.notes || '',
     subtasks: parseChecklistSubtasks(row.subtasks_json),
+    attachments: Array.isArray(attachments) ? attachments : [],
     createdAt: row.created_at,
     updatedAt: row.updated_at
 });
@@ -1134,19 +1203,895 @@ const assertChecklistOwner = async (listId, username) => {
     return rows[0] || null;
 };
 
+const CHECKLIST_INVITE_STATUSES = Object.freeze({
+    pending: 'pending',
+    accepted: 'accepted',
+    rejected: 'rejected',
+    expired: 'expired',
+    revoked: 'revoked'
+});
+
+const CHECKLIST_MEMBER_ROLES = Object.freeze({
+    editor: 'editor',
+    readonly: 'readonly'
+});
+
+const CHECKLIST_INVITE_DEFAULT_EXPIRES_DAYS = 7;
+const CHECKLIST_INVITE_MAX_EXPIRES_DAYS = 30;
+
+const clampInt = (value, { min, max }) => {
+    const parsed = parseInt(value, 10);
+    if (!Number.isFinite(parsed)) return min;
+    return Math.max(min, Math.min(max, parsed));
+};
+
+const maskUsernameForDisplay = (username) => {
+    const str = String(username || '');
+    if (!str) return '';
+    if (str.length <= 2) return `${str[0]}*`;
+    if (str.length <= 4) return `${str.slice(0, 1)}${'*'.repeat(str.length - 2)}${str.slice(-1)}`;
+    return `${str.slice(0, 2)}${'*'.repeat(str.length - 4)}${str.slice(-2)}`;
+};
+
+const escapeSqlLike = (input) => String(input || '').replace(/[\\%_]/g, (m) => `\\${m}`);
+
+const createUserKey = () => {
+    if (typeof crypto.randomUUID === 'function') return crypto.randomUUID().replace(/-/g, '');
+    return crypto.randomBytes(16).toString('hex');
+};
+
+const getOrCreateUserKey = async (username) => {
+    const normalized = String(username || '').trim();
+    if (!normalized) return '';
+    const existing = await dbAll("SELECT user_key FROM user_public_ids WHERE username = ?", [normalized]);
+    if (existing.length && existing[0]?.user_key) return String(existing[0].user_key);
+
+    const now = Date.now();
+    for (let attempt = 0; attempt < 5; attempt++) {
+        const userKey = createUserKey();
+        try {
+            await dbRun(
+                "INSERT INTO user_public_ids (user_key, username, created_at) VALUES (?, ?, ?)",
+                [userKey, normalized, now]
+            );
+            return userKey;
+        } catch (e) {
+            const rows = await dbAll("SELECT user_key FROM user_public_ids WHERE username = ?", [normalized]);
+            if (rows.length && rows[0]?.user_key) return String(rows[0].user_key);
+        }
+    }
+    const fallback = await dbAll("SELECT user_key FROM user_public_ids WHERE username = ?", [normalized]);
+    return fallback.length && fallback[0]?.user_key ? String(fallback[0].user_key) : '';
+};
+
+const resolveUserKey = async (userKey) => {
+    const normalized = String(userKey || '').trim();
+    if (!normalized) return null;
+    const rows = await dbAll("SELECT username FROM user_public_ids WHERE user_key = ?", [normalized]);
+    return rows.length ? String(rows[0].username || '') : null;
+};
+
+const insertChecklistAuditLog = async ({
+    listId,
+    actor,
+    type,
+    targetType = null,
+    targetId = null,
+    data = null,
+    createdAt = null
+}) => {
+    const now = createdAt ?? Date.now();
+    try {
+        await dbRun(
+            `INSERT INTO checklist_audit_logs
+             (list_id, actor, type, target_type, target_id, data_json, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+                listId,
+                actor,
+                type,
+                targetType,
+                targetId,
+                data ? JSON.stringify(data) : null,
+                now
+            ]
+        );
+    } catch (e) {}
+
+    try {
+        await maybeCleanupChecklistAuditLogs(now);
+    } catch (e) {}
+};
+
+const CHECKLIST_AUDIT_RETENTION_DAYS = (() => {
+    const raw = process.env.CHECKLIST_AUDIT_RETENTION_DAYS;
+    const parsed = raw == null ? NaN : parseInt(String(raw), 10);
+    const value = Number.isFinite(parsed) ? parsed : 180;
+    return Math.max(1, Math.min(3650, value));
+})();
+const CHECKLIST_AUDIT_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+let lastChecklistAuditCleanupAt = 0;
+
+const maybeCleanupChecklistAuditLogs = async (now = Date.now()) => {
+    if (now - lastChecklistAuditCleanupAt < CHECKLIST_AUDIT_CLEANUP_INTERVAL_MS) return;
+    lastChecklistAuditCleanupAt = now;
+    const cutoff = now - CHECKLIST_AUDIT_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    if (!Number.isFinite(cutoff) || cutoff <= 0) return;
+    try {
+        await dbRun("DELETE FROM checklist_audit_logs WHERE created_at < ?", [cutoff]);
+    } catch (e) {}
+};
+
+const insertUserNotification = async ({
+    username,
+    type,
+    title,
+    body,
+    data = null,
+    createdAt = null
+}) => {
+    const now = createdAt ?? Date.now();
+    try {
+        await dbRun(
+            `INSERT INTO user_notifications
+             (username, type, title, body, data_json, created_at, read_at)
+             VALUES (?, ?, ?, ?, ?, ?, NULL)`,
+            [username, type, title, body, data ? JSON.stringify(data) : null, now]
+        );
+    } catch (e) {}
+};
+
+const userSettingsCacheForNotifications = new Map();
+const USER_SETTINGS_CACHE_TTL_MS = 30_000;
+
+const loadSanitizedUserSettings = async (username) => {
+    const key = String(username || '').trim();
+    if (!key) return sanitizeUserSettings({});
+    const cached = userSettingsCacheForNotifications.get(key);
+    const now = Date.now();
+    if (cached && now - cached.fetchedAt < USER_SETTINGS_CACHE_TTL_MS) return cached.settings;
+    let parsed = null;
+    try {
+        const rows = await dbAll("SELECT settings_json FROM user_settings WHERE username = ?", [key]);
+        if (rows.length && rows[0].settings_json) parsed = JSON.parse(rows[0].settings_json);
+    } catch (e) {
+        parsed = null;
+    }
+    const sanitized = sanitizeUserSettings(parsed || {});
+    userSettingsCacheForNotifications.set(key, { settings: sanitized, fetchedAt: now });
+    return sanitized;
+};
+
+const parseHHmmToMinutes = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+    const parts = raw.split(':');
+    if (parts.length !== 2) return null;
+    const hh = parseInt(parts[0], 10);
+    const mm = parseInt(parts[1], 10);
+    if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+    if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+    return hh * 60 + mm;
+};
+
+const isQuietHoursActiveAt = (settings, now) => {
+    const notifications = settings?.notifications;
+    if (!notifications?.enabled) return true;
+    if (!notifications?.quietHoursEnabled) return false;
+
+    const quiet = notifications?.quietHours || {};
+    const startMinutes = parseHHmmToMinutes(quiet.start);
+    const endMinutes = parseHHmmToMinutes(quiet.end);
+    if (startMinutes == null || endMinutes == null) return false;
+    if (startMinutes === endMinutes) return false;
+
+    const offsetMinutes = Number(settings?.preferences?.timeZoneOffsetMinutes || 0);
+    const localNow = new Date(now + offsetMinutes * 60 * 1000);
+    const minutes = localNow.getUTCHours() * 60 + localNow.getUTCMinutes();
+
+    if (startMinutes < endMinutes) {
+        return minutes >= startMinutes && minutes < endMinutes;
+    }
+    return minutes >= startMinutes || minutes < endMinutes;
+};
+
+const canSendPushNowForUser = async (username) => {
+    const settings = await loadSanitizedUserSettings(username);
+    if (!settings?.notifications?.enabled) return false;
+    if (isQuietHoursActiveAt(settings, Date.now())) return false;
+    return true;
+};
+
+const sendRealtimeNotificationToUser = async (username, payload) => {
+    const user = String(username || '').trim();
+    if (!user) return false;
+    const allowed = await canSendPushNowForUser(user);
+    if (!allowed) return false;
+
+    const pushReady = isPushConfigured();
+    const fcmReady = await ensureFirebaseAdmin();
+    if (!pushReady && !fcmReady) return false;
+
+    let sent = false;
+    if (fcmReady) sent = (await sendFcmToUser(user, payload)) || sent;
+    if (pushReady) sent = (await sendPushToUser(user, payload)) || sent;
+    return sent;
+};
+
+const notifyUser = async ({
+    username,
+    type,
+    title,
+    body,
+    data = null,
+    push = true,
+    pushUrl = '/',
+    pushTag = null
+}) => {
+    await insertUserNotification({ username, type, title, body, data });
+    if (!push) return;
+    const tag = pushTag || `${type}-${Date.now()}`;
+    await sendRealtimeNotificationToUser(username, { title, body, url: pushUrl, tag });
+};
+
+const normalizeChecklistMemberRole = (rawRole, rawCanEdit) => {
+    const role = String(rawRole || '').trim().toLowerCase();
+    if (role === CHECKLIST_MEMBER_ROLES.readonly) return CHECKLIST_MEMBER_ROLES.readonly;
+    if (role === CHECKLIST_MEMBER_ROLES.editor) return CHECKLIST_MEMBER_ROLES.editor;
+    if (typeof rawCanEdit === 'boolean') {
+        return rawCanEdit ? CHECKLIST_MEMBER_ROLES.editor : CHECKLIST_MEMBER_ROLES.readonly;
+    }
+    return CHECKLIST_MEMBER_ROLES.editor;
+};
+
+const getChecklistMemberUsernames = async (listId) => {
+    const listRows = await dbAll("SELECT id, name, owner FROM checklists WHERE id = ?", [listId]);
+    const list = listRows[0];
+    if (!list) return { name: '', owner: '', members: [] };
+    const owner = String(list.owner || '').trim();
+    const name = String(list.name || '').trim();
+    const shareRows = await dbAll("SELECT shared_user FROM checklist_shares WHERE list_id = ?", [listId]);
+    const members = new Set();
+    if (owner) members.add(owner);
+    for (const row of shareRows) {
+        const user = String(row?.shared_user || '').trim();
+        if (user) members.add(user);
+    }
+    return { name, owner, members: Array.from(members) };
+};
+
+const expirePendingInviteIfNeeded = async (inviteRow, now) => {
+    if (!inviteRow) return inviteRow;
+    if (inviteRow.status !== CHECKLIST_INVITE_STATUSES.pending) return inviteRow;
+    if (now < Number(inviteRow.expires_at || 0)) return inviteRow;
+    try {
+        await dbRun(
+            "UPDATE checklist_share_invites SET status = ?, updated_at = ?, responded_at = ? WHERE id = ? AND status = ?",
+            [CHECKLIST_INVITE_STATUSES.expired, now, now, inviteRow.id, CHECKLIST_INVITE_STATUSES.pending]
+        );
+    } catch (e) {}
+    return { ...inviteRow, status: CHECKLIST_INVITE_STATUSES.expired, updated_at: now, responded_at: now };
+};
+
+app.get('/api/users/search', authenticate, async (req, res) => {
+    const q = String(req.query.q || '').trim();
+    const limit = clampInt(req.query.limit, { min: 1, max: 20 });
+    const offset = clampInt(req.query.offset, { min: 0, max: 500 });
+    if (q.length < 3) return res.json({ users: [] });
+
+    const ip = getRequestIp(req);
+    const bucketKey = `user-search:${req.user.username}:${ip}`;
+    if (!rateLimit(bucketKey, { windowMs: 60_000, limit: 20 })) {
+        return res.status(429).json({ error: 'Too many requests' });
+    }
+
+    try {
+        const escaped = escapeSqlLike(q);
+        const pattern = `%${escaped}%`;
+        const rows = await dbAll(
+            "SELECT username FROM users WHERE username LIKE ? ESCAPE '\\' ORDER BY username ASC LIMIT ? OFFSET ?",
+            [pattern, limit, offset]
+        );
+        const users = [];
+        for (const row of rows) {
+            const username = String(row?.username || '').trim();
+            if (!username || username === req.user.username) continue;
+            const userKey = await getOrCreateUserKey(username);
+            if (!userKey) continue;
+            users.push({ userKey, display: maskUsernameForDisplay(username) });
+        }
+        return res.json({ users });
+    } catch (e) {
+        return res.status(500).json({ error: 'Failed to search users' });
+    }
+});
+
+app.get('/api/users/collab-candidates', authenticate, async (req, res) => {
+    const limit = clampInt(req.query.limit, { min: 1, max: 30 });
+    const username = req.user.username;
+    try {
+        const rows = await dbAll(
+            `SELECT user, MAX(ts) AS last_ts FROM (
+                SELECT shared_user AS user, created_at AS ts FROM checklist_shares WHERE owner = ?
+                UNION ALL
+                SELECT owner AS user, created_at AS ts FROM checklist_shares WHERE shared_user = ?
+                UNION ALL
+                SELECT invitee AS user, created_at AS ts FROM checklist_share_invites WHERE inviter = ?
+                UNION ALL
+                SELECT inviter AS user, created_at AS ts FROM checklist_share_invites WHERE invitee = ?
+            ) WHERE user IS NOT NULL AND trim(user) != '' AND user != ?
+            GROUP BY user
+            ORDER BY last_ts DESC
+            LIMIT ?`,
+            [username, username, username, username, username, limit]
+        );
+        const users = [];
+        for (const row of rows) {
+            const other = String(row?.user || '').trim();
+            if (!other || other === username) continue;
+            const userKey = await getOrCreateUserKey(other);
+            if (!userKey) continue;
+            users.push({ userKey, display: maskUsernameForDisplay(other) });
+        }
+        return res.json({ users });
+    } catch (e) {
+        return res.status(500).json({ error: 'Failed to load candidates' });
+    }
+});
+
+app.get('/api/checklists/:id/invites', authenticate, async (req, res) => {
+    const listId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(listId)) return res.status(400).json({ error: 'Invalid checklist id' });
+    const limit = clampInt(req.query.limit, { min: 1, max: 100 });
+    const offset = clampInt(req.query.offset, { min: 0, max: 1000 });
+    try {
+        const owned = await assertChecklistOwner(listId, req.user.username);
+        if (!owned) return res.status(404).json({ error: 'Checklist not found' });
+
+        const now = Date.now();
+        const rows = await dbAll(
+            `SELECT id, list_id, inviter, invitee, role, status, created_at, updated_at, expires_at, responded_at
+             FROM checklist_share_invites
+             WHERE list_id = ?
+             ORDER BY created_at DESC
+             LIMIT ? OFFSET ?`,
+            [listId, limit, offset]
+        );
+
+        const invites = [];
+        for (const row of rows) {
+            const normalized = await expirePendingInviteIfNeeded(row, now);
+            const invitee = String(normalized?.invitee || '').trim();
+            const inviteeKey = invitee ? await getOrCreateUserKey(invitee) : '';
+            invites.push({
+                id: Number(normalized.id),
+                listId: Number(normalized.list_id),
+                inviter: String(normalized.inviter || ''),
+                inviteeKey,
+                inviteeDisplay: maskUsernameForDisplay(invitee),
+                role: String(normalized.role || ''),
+                status: String(normalized.status || ''),
+                createdAt: Number(normalized.created_at) || 0,
+                updatedAt: Number(normalized.updated_at) || 0,
+                expiresAt: Number(normalized.expires_at) || 0,
+                respondedAt: normalized.responded_at == null ? null : Number(normalized.responded_at)
+            });
+        }
+        return res.json({ invites });
+    } catch (e) {
+        return res.status(500).json({ error: 'Failed to load invites' });
+    }
+});
+
+app.post('/api/checklists/:id/invites', authenticate, async (req, res) => {
+    const listId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(listId)) return res.status(400).json({ error: 'Invalid checklist id' });
+
+    const now = Date.now();
+    const expiresInDays = clampInt(
+        req.body?.expiresInDays ?? CHECKLIST_INVITE_DEFAULT_EXPIRES_DAYS,
+        { min: 1, max: CHECKLIST_INVITE_MAX_EXPIRES_DAYS }
+    );
+
+    const rawInvites = Array.isArray(req.body?.invites) ? req.body.invites : null;
+    const single = (!rawInvites && (req.body?.userKey || req.body?.user))
+        ? [{ userKey: req.body.userKey, user: req.body.user, role: req.body.role, canEdit: req.body.canEdit }]
+        : null;
+    const invitesPayload = rawInvites || single || [];
+
+    if (!Array.isArray(invitesPayload) || !invitesPayload.length) {
+        return res.status(400).json({ error: 'Invites are required' });
+    }
+
+    try {
+        const owned = await assertChecklistOwner(listId, req.user.username);
+        if (!owned) return res.status(404).json({ error: 'Checklist not found' });
+
+        const created = [];
+        for (const entry of invitesPayload) {
+            const userKey = entry?.userKey ?? entry?.user_key;
+            const user = entry?.user ?? entry?.username;
+            let invitee = null;
+            if (userKey) invitee = await resolveUserKey(userKey);
+            if (!invitee && user) invitee = String(user).trim();
+            if (!invitee) continue;
+            if (invitee === req.user.username) continue;
+
+            const userRows = await dbAll("SELECT username FROM users WHERE username = ?", [invitee]);
+            if (!userRows.length) continue;
+
+            const access = await getChecklistAccess(listId, invitee);
+            if (access) continue; // already a member/owner
+
+            const role = normalizeChecklistMemberRole(entry?.role, entry?.canEdit);
+            const expiresAt = now + expiresInDays * 24 * 60 * 60 * 1000;
+
+            // Ensure there is no active pending invite.
+            const existingRows = await dbAll(
+                `SELECT id, list_id, inviter, invitee, role, status, created_at, updated_at, expires_at, responded_at
+                 FROM checklist_share_invites
+                 WHERE list_id = ? AND invitee = ? AND status = ?
+                 ORDER BY created_at DESC
+                 LIMIT 1`,
+                [listId, invitee, CHECKLIST_INVITE_STATUSES.pending]
+            );
+            let pending = existingRows[0] || null;
+            if (pending) {
+                pending = await expirePendingInviteIfNeeded(pending, now);
+                if (pending.status === CHECKLIST_INVITE_STATUSES.pending) {
+                    await dbRun(
+                        "UPDATE checklist_share_invites SET role = ?, expires_at = ?, updated_at = ? WHERE id = ?",
+                        [role, expiresAt, now, pending.id]
+                    );
+                    pending.role = role;
+                    pending.expires_at = expiresAt;
+                    pending.updated_at = now;
+                    created.push(pending);
+                    continue;
+                }
+            }
+
+            const result = await dbRun(
+                `INSERT INTO checklist_share_invites
+                 (list_id, inviter, invitee, role, status, created_at, updated_at, expires_at, responded_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+                [listId, req.user.username, invitee, role, CHECKLIST_INVITE_STATUSES.pending, now, now, expiresAt]
+            );
+            const inviteRow = {
+                id: result.lastID,
+                list_id: listId,
+                inviter: req.user.username,
+                invitee,
+                role,
+                status: CHECKLIST_INVITE_STATUSES.pending,
+                created_at: now,
+                updated_at: now,
+                expires_at: expiresAt,
+                responded_at: null
+            };
+            created.push(inviteRow);
+
+            await insertChecklistAuditLog({
+                listId,
+                actor: req.user.username,
+                type: 'invite_sent',
+                targetType: 'invite',
+                targetId: String(inviteRow.id),
+                data: { invitee, role, expiresAt }
+            });
+
+            await notifyUser({
+                username: invitee,
+                type: 'checklist_invite',
+                title: 'Checklist invitation',
+                body: `${req.user.username} invited you to "${owned.name || 'Checklist'}"`,
+                data: { inviteId: inviteRow.id, listId, listName: owned.name || '', inviter: req.user.username, role, expiresAt },
+                push: true,
+                pushUrl: '/'
+            });
+        }
+
+        const invites = [];
+        for (const row of created) {
+            const invitee = String(row?.invitee || '').trim();
+            const inviteeKey = invitee ? await getOrCreateUserKey(invitee) : '';
+            invites.push({
+                id: Number(row.id),
+                listId: Number(row.list_id),
+                inviter: String(row.inviter || ''),
+                inviteeKey,
+                inviteeDisplay: maskUsernameForDisplay(invitee),
+                role: String(row.role || ''),
+                status: String(row.status || ''),
+                createdAt: Number(row.created_at) || 0,
+                updatedAt: Number(row.updated_at) || 0,
+                expiresAt: Number(row.expires_at) || 0,
+                respondedAt: row.responded_at == null ? null : Number(row.responded_at)
+            });
+        }
+
+        return res.json({ success: true, invites });
+    } catch (e) {
+        return res.status(500).json({ error: 'Failed to create invites' });
+    }
+});
+
+app.get('/api/checklist-invites', authenticate, async (req, res) => {
+    const limit = clampInt(req.query.limit, { min: 1, max: 100 });
+    const offset = clampInt(req.query.offset, { min: 0, max: 1000 });
+    try {
+        const now = Date.now();
+        const rows = await dbAll(
+            `SELECT i.id, i.list_id, i.inviter, i.invitee, i.role, i.status, i.created_at, i.updated_at, i.expires_at, i.responded_at,
+                    c.name AS list_name, c.owner AS list_owner
+             FROM checklist_share_invites i
+             JOIN checklists c ON c.id = i.list_id
+             WHERE i.invitee = ?
+             ORDER BY i.created_at DESC
+             LIMIT ? OFFSET ?`,
+            [req.user.username, limit, offset]
+        );
+        const invites = [];
+        for (const row of rows) {
+            const normalized = await expirePendingInviteIfNeeded(row, now);
+            invites.push({
+                id: Number(normalized.id),
+                listId: Number(normalized.list_id),
+                listName: String(normalized.list_name || ''),
+                listOwner: String(normalized.list_owner || ''),
+                inviter: String(normalized.inviter || ''),
+                role: String(normalized.role || ''),
+                status: String(normalized.status || ''),
+                createdAt: Number(normalized.created_at) || 0,
+                updatedAt: Number(normalized.updated_at) || 0,
+                expiresAt: Number(normalized.expires_at) || 0,
+                respondedAt: normalized.responded_at == null ? null : Number(normalized.responded_at)
+            });
+        }
+        return res.json({ invites });
+    } catch (e) {
+        return res.status(500).json({ error: 'Failed to load invites' });
+    }
+});
+
+app.post('/api/checklist-invites/:inviteId/accept', authenticate, async (req, res) => {
+    const inviteId = parseInt(req.params.inviteId, 10);
+    if (!Number.isFinite(inviteId)) return res.status(400).json({ error: 'Invalid invite id' });
+    const now = Date.now();
+    try {
+        const rows = await dbAll(
+            `SELECT id, list_id, inviter, invitee, role, status, created_at, updated_at, expires_at, responded_at
+             FROM checklist_share_invites
+             WHERE id = ?`,
+            [inviteId]
+        );
+        let invite = rows[0];
+        if (!invite || String(invite.invitee || '') !== req.user.username) {
+            return res.status(404).json({ error: 'Invite not found' });
+        }
+        invite = await expirePendingInviteIfNeeded(invite, now);
+        if (invite.status !== CHECKLIST_INVITE_STATUSES.pending) {
+            return res.status(409).json({ error: 'Invite is not pending', status: invite.status });
+        }
+        const listRows = await dbAll("SELECT id, name, owner FROM checklists WHERE id = ?", [invite.list_id]);
+        const list = listRows[0];
+        if (!list) return res.status(404).json({ error: 'Checklist not found' });
+
+        const canEdit = String(invite.role || '').toLowerCase() !== CHECKLIST_MEMBER_ROLES.readonly;
+
+        const existingShare = await dbAll(
+            "SELECT created_at FROM checklist_shares WHERE list_id = ? AND shared_user = ?",
+            [invite.list_id, req.user.username]
+        );
+        const shareCreatedAt = existingShare.length ? Number(existingShare[0].created_at) || now : now;
+
+        await dbRun('BEGIN');
+        if (existingShare.length) {
+            await dbRun(
+                "UPDATE checklist_shares SET owner = ?, can_edit = ? WHERE list_id = ? AND shared_user = ?",
+                [list.owner, canEdit ? 1 : 0, invite.list_id, req.user.username]
+            );
+        } else {
+            await dbRun(
+                "INSERT INTO checklist_shares (list_id, owner, shared_user, can_edit, created_at) VALUES (?, ?, ?, ?, ?)",
+                [invite.list_id, list.owner, req.user.username, canEdit ? 1 : 0, shareCreatedAt]
+            );
+        }
+        await dbRun(
+            "UPDATE checklist_share_invites SET status = ?, updated_at = ?, responded_at = ? WHERE id = ? AND status = ?",
+            [CHECKLIST_INVITE_STATUSES.accepted, now, now, inviteId, CHECKLIST_INVITE_STATUSES.pending]
+        );
+        await dbRun('COMMIT');
+
+        await insertChecklistAuditLog({
+            listId: Number(invite.list_id),
+            actor: req.user.username,
+            type: 'invite_accepted',
+            targetType: 'invite',
+            targetId: String(inviteId),
+            data: { inviter: invite.inviter, role: invite.role }
+        });
+
+        await notifyUser({
+            username: String(list.owner || ''),
+            type: 'checklist_invite_accepted',
+            title: 'Invitation accepted',
+            body: `${req.user.username} joined "${list.name || 'Checklist'}"`,
+            data: { inviteId, listId: Number(list.id), listName: list.name || '', invitee: req.user.username },
+            push: true,
+            pushUrl: '/'
+        });
+
+        return res.json({ success: true });
+    } catch (e) {
+        try { await dbRun('ROLLBACK'); } catch (rollbackErr) {}
+        return res.status(500).json({ error: 'Failed to accept invite' });
+    }
+});
+
+app.post('/api/checklist-invites/:inviteId/reject', authenticate, async (req, res) => {
+    const inviteId = parseInt(req.params.inviteId, 10);
+    if (!Number.isFinite(inviteId)) return res.status(400).json({ error: 'Invalid invite id' });
+    const now = Date.now();
+    try {
+        const rows = await dbAll(
+            `SELECT id, list_id, inviter, invitee, role, status, created_at, updated_at, expires_at, responded_at
+             FROM checklist_share_invites
+             WHERE id = ?`,
+            [inviteId]
+        );
+        let invite = rows[0];
+        if (!invite || String(invite.invitee || '') !== req.user.username) {
+            return res.status(404).json({ error: 'Invite not found' });
+        }
+        invite = await expirePendingInviteIfNeeded(invite, now);
+        if (invite.status !== CHECKLIST_INVITE_STATUSES.pending) {
+            return res.status(409).json({ error: 'Invite is not pending', status: invite.status });
+        }
+
+        await dbRun(
+            "UPDATE checklist_share_invites SET status = ?, updated_at = ?, responded_at = ? WHERE id = ? AND status = ?",
+            [CHECKLIST_INVITE_STATUSES.rejected, now, now, inviteId, CHECKLIST_INVITE_STATUSES.pending]
+        );
+
+        const listRows = await dbAll("SELECT id, name, owner FROM checklists WHERE id = ?", [invite.list_id]);
+        const list = listRows[0];
+        if (list) {
+            await notifyUser({
+                username: String(list.owner || invite.inviter || ''),
+                type: 'checklist_invite_rejected',
+                title: 'Invitation rejected',
+                body: `${req.user.username} rejected invitation to "${list.name || 'Checklist'}"`,
+                data: { inviteId, listId: Number(list.id), listName: list.name || '', invitee: req.user.username },
+                push: true,
+                pushUrl: '/'
+            });
+        }
+
+        await insertChecklistAuditLog({
+            listId: Number(invite.list_id),
+            actor: req.user.username,
+            type: 'invite_rejected',
+            targetType: 'invite',
+            targetId: String(inviteId),
+            data: { inviter: invite.inviter, role: invite.role }
+        });
+
+        return res.json({ success: true });
+    } catch (e) {
+        return res.status(500).json({ error: 'Failed to reject invite' });
+    }
+});
+
+app.post('/api/checklist-invites/:inviteId/revoke', authenticate, async (req, res) => {
+    const inviteId = parseInt(req.params.inviteId, 10);
+    if (!Number.isFinite(inviteId)) return res.status(400).json({ error: 'Invalid invite id' });
+    const now = Date.now();
+    try {
+        const rows = await dbAll(
+            `SELECT id, list_id, inviter, invitee, role, status, created_at, updated_at, expires_at, responded_at
+             FROM checklist_share_invites
+             WHERE id = ?`,
+            [inviteId]
+        );
+        let invite = rows[0];
+        if (!invite) return res.status(404).json({ error: 'Invite not found' });
+
+        const owned = await assertChecklistOwner(Number(invite.list_id), req.user.username);
+        if (!owned) return res.status(403).json({ error: 'Forbidden' });
+
+        invite = await expirePendingInviteIfNeeded(invite, now);
+        if (invite.status !== CHECKLIST_INVITE_STATUSES.pending) {
+            return res.status(409).json({ error: 'Invite is not pending', status: invite.status });
+        }
+
+        await dbRun(
+            "UPDATE checklist_share_invites SET status = ?, updated_at = ?, responded_at = ? WHERE id = ? AND status = ?",
+            [CHECKLIST_INVITE_STATUSES.revoked, now, now, inviteId, CHECKLIST_INVITE_STATUSES.pending]
+        );
+
+        await insertChecklistAuditLog({
+            listId: Number(invite.list_id),
+            actor: req.user.username,
+            type: 'invite_revoked',
+            targetType: 'invite',
+            targetId: String(inviteId),
+            data: { invitee: invite.invitee, role: invite.role }
+        });
+
+        await notifyUser({
+            username: String(invite.invitee || ''),
+            type: 'checklist_invite_revoked',
+            title: 'Invitation revoked',
+            body: `Invitation to "${owned.name || 'Checklist'}" was revoked`,
+            data: { inviteId, listId: Number(invite.list_id), listName: owned.name || '', inviter: req.user.username },
+            push: true,
+            pushUrl: '/'
+        });
+
+        return res.json({ success: true });
+    } catch (e) {
+        return res.status(500).json({ error: 'Failed to revoke invite' });
+    }
+});
+
+// In-app notifications inbox
+app.get('/api/notifications', authenticate, async (req, res) => {
+    const limit = clampInt(req.query.limit, { min: 1, max: 200 });
+    const offset = clampInt(req.query.offset, { min: 0, max: 5000 });
+    const unreadOnly = String(req.query.unreadOnly || '').trim().toLowerCase() === 'true';
+    try {
+        const where = unreadOnly ? 'username = ? AND read_at IS NULL' : 'username = ?';
+        const rows = await dbAll(
+            `SELECT id, type, title, body, data_json, created_at, read_at
+             FROM user_notifications
+             WHERE ${where}
+             ORDER BY created_at DESC, id DESC
+             LIMIT ? OFFSET ?`,
+            [req.user.username, limit, offset]
+        );
+        const notifications = rows.map((row) => {
+            let data = null;
+            try {
+                data = row.data_json ? JSON.parse(row.data_json) : null;
+            } catch (e) {
+                data = null;
+            }
+            return {
+                id: Number(row.id),
+                type: String(row.type || ''),
+                title: String(row.title || ''),
+                body: String(row.body || ''),
+                data,
+                createdAt: Number(row.created_at) || 0,
+                readAt: row.read_at == null ? null : Number(row.read_at)
+            };
+        });
+        return res.json({ notifications });
+    } catch (e) {
+        return res.status(500).json({ error: 'Failed to load notifications' });
+    }
+});
+
+app.post('/api/notifications/:id/read', authenticate, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid notification id' });
+    const now = Date.now();
+    try {
+        const result = await dbRun(
+            "UPDATE user_notifications SET read_at = ? WHERE id = ? AND username = ? AND read_at IS NULL",
+            [now, id, req.user.username]
+        );
+        return res.json({ success: true, updated: result.changes || 0 });
+    } catch (e) {
+        return res.status(500).json({ error: 'Failed to mark notification as read' });
+    }
+});
+
+app.post('/api/notifications/read-all', authenticate, async (req, res) => {
+    const now = Date.now();
+    try {
+        const result = await dbRun(
+            "UPDATE user_notifications SET read_at = ? WHERE username = ? AND read_at IS NULL",
+            [now, req.user.username]
+        );
+        return res.json({ success: true, updated: result.changes || 0 });
+    } catch (e) {
+        return res.status(500).json({ error: 'Failed to mark notifications as read' });
+    }
+});
+
+// Checklist audit logs (query + filters)
+app.get('/api/checklists/:id/logs', authenticate, async (req, res) => {
+    const listId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(listId)) return res.status(400).json({ error: 'Invalid checklist id' });
+
+    const limit = clampInt(req.query.limit, { min: 1, max: 200 });
+    const offset = clampInt(req.query.offset, { min: 0, max: 5000 });
+    const actor = String(req.query.actor || '').trim();
+    const type = String(req.query.type || '').trim();
+    const targetType = String(req.query.targetType || '').trim();
+    const targetId = String(req.query.targetId || '').trim();
+    const from = req.query.from == null ? null : Number(req.query.from);
+    const to = req.query.to == null ? null : Number(req.query.to);
+
+    try {
+        const access = await getChecklistAccess(listId, req.user.username);
+        if (!access) return res.status(404).json({ error: 'Checklist not found' });
+
+        let sql =
+            `SELECT id, list_id, actor, type, target_type, target_id, data_json, created_at
+             FROM checklist_audit_logs
+             WHERE list_id = ?`;
+        const params = [listId];
+
+        if (actor) {
+            sql += ' AND actor = ?';
+            params.push(actor);
+        }
+        if (type) {
+            sql += ' AND type = ?';
+            params.push(type);
+        }
+        if (targetType) {
+            sql += ' AND target_type = ?';
+            params.push(targetType);
+        }
+        if (targetId) {
+            sql += ' AND target_id = ?';
+            params.push(targetId);
+        }
+        if (Number.isFinite(from)) {
+            sql += ' AND created_at >= ?';
+            params.push(from);
+        }
+        if (Number.isFinite(to)) {
+            sql += ' AND created_at < ?';
+            params.push(to);
+        }
+
+        sql += ' ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?';
+        params.push(limit, offset);
+
+        const rows = await dbAll(sql, params);
+        const logs = rows.map((row) => {
+            let data = null;
+            try {
+                data = row.data_json ? JSON.parse(row.data_json) : null;
+            } catch (e) {
+                data = null;
+            }
+            return {
+                id: Number(row.id),
+                listId: Number(row.list_id),
+                actor: String(row.actor || ''),
+                type: String(row.type || ''),
+                targetType: row.target_type == null ? null : String(row.target_type),
+                targetId: row.target_id == null ? null : String(row.target_id),
+                data,
+                createdAt: Number(row.created_at) || 0
+            };
+        });
+        return res.json({ logs });
+    } catch (e) {
+        return res.status(500).json({ error: 'Failed to load logs' });
+    }
+});
+
 app.get('/api/checklists', authenticate, async (req, res) => {
     try {
         const rows = await dbAll(
             `SELECT c.id, c.name, c.owner, c.created_at, c.updated_at,
-                    COUNT(DISTINCT s.shared_user) AS shared_count
+                    COUNT(DISTINCT s.shared_user) AS shared_count,
+                    MAX(CASE WHEN s.shared_user = ? THEN s.can_edit ELSE NULL END) AS can_edit_for_user
              FROM checklists c
              LEFT JOIN checklist_shares s ON s.list_id = c.id
              WHERE c.owner = ? OR s.shared_user = ?
              GROUP BY c.id, c.name, c.owner, c.created_at, c.updated_at
              ORDER BY c.created_at ASC`,
-            [req.user.username, req.user.username]
+            [req.user.username, req.user.username, req.user.username]
         );
-        res.json({ lists: rows.map(mapChecklistRow) });
+        res.json({ lists: rows.map((row) => mapChecklistRow(row, req.user.username)) });
     } catch (e) {
         res.status(500).json({ error: 'Failed to load checklists' });
     }
@@ -1161,7 +2106,27 @@ app.post('/api/checklists', authenticate, async (req, res) => {
             "INSERT INTO checklists (owner, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
             [req.user.username, name, now, now]
         );
-        res.json({ success: true, list: { id: result.lastID, name, owner: req.user.username, createdAt: now, updatedAt: now } });
+        await insertChecklistAuditLog({
+            listId: result.lastID,
+            actor: req.user.username,
+            type: 'checklist_created',
+            targetType: 'list',
+            targetId: String(result.lastID),
+            data: { name }
+        });
+        res.json({
+            success: true,
+            list: {
+                id: result.lastID,
+                name,
+                owner: req.user.username,
+                role: 'owner',
+                canEdit: true,
+                sharedCount: 0,
+                createdAt: now,
+                updatedAt: now
+            }
+        });
     } catch (e) {
         res.status(500).json({ error: 'Failed to create checklist' });
     }
@@ -1172,13 +2137,46 @@ app.patch('/api/checklists/:id', authenticate, async (req, res) => {
     if (!Number.isFinite(listId)) return res.status(400).json({ error: 'Invalid checklist id' });
     const name = String(req.body.name || '').trim();
     if (!name) return res.status(400).json({ error: 'Name is required' });
+    const expectedUpdatedAt = req.body?.expectedUpdatedAt;
     const now = Date.now();
     try {
         const access = await getChecklistAccess(listId, req.user.username);
         if (!access) return res.status(404).json({ error: '清单不存在或无权限' });
-        if (access.role !== 'owner' && !access.canEdit) return res.status(403).json({ error: '无权编辑该清单' });
+        if (access.role !== 'owner') return res.status(403).json({ error: '无权编辑该清单' });
+        if (expectedUpdatedAt !== undefined && Number(expectedUpdatedAt) !== Number(access.list.updated_at)) {
+            return res.status(409).json({
+                error: 'Conflict',
+                serverUpdatedAt: Number(access.list.updated_at) || 0
+            });
+        }
+        const previousName = String(access.list.name || '');
         await dbRun("UPDATE checklists SET name = ?, updated_at = ? WHERE id = ?", [name, now, listId]);
-        res.json({ success: true, list: { id: listId, name, owner: access.list.owner, createdAt: access.list.created_at, updatedAt: now } });
+        const countRows = await dbAll(
+            "SELECT COUNT(DISTINCT shared_user) AS shared_count FROM checklist_shares WHERE list_id = ?",
+            [listId]
+        );
+        const sharedCount = Number(countRows[0]?.shared_count || 0);
+        await insertChecklistAuditLog({
+            listId,
+            actor: req.user.username,
+            type: 'checklist_renamed',
+            targetType: 'list',
+            targetId: String(listId),
+            data: { from: previousName, to: name }
+        });
+        res.json({
+            success: true,
+            list: {
+                id: listId,
+                name,
+                owner: access.list.owner,
+                role: 'owner',
+                canEdit: true,
+                sharedCount,
+                createdAt: access.list.created_at,
+                updatedAt: now
+            }
+        });
     } catch (e) {
         res.status(500).json({ error: 'Failed to update checklist' });
     }
@@ -1190,9 +2188,27 @@ app.delete('/api/checklists/:id', authenticate, async (req, res) => {
     try {
         const owned = await assertChecklistOwner(listId, req.user.username);
         if (!owned) return res.status(404).json({ error: '清单不存在或无权限' });
+        const attachmentRows = await dbAll(
+            "SELECT id, storage_driver, storage_path FROM checklist_item_attachments WHERE list_id = ?",
+            [listId]
+        );
+        for (const attachment of attachmentRows) {
+            try {
+                await deleteAttachmentFile({
+                    storageDriver: attachment.storage_driver,
+                    storagePath: attachment.storage_path
+                });
+            } catch (e) {
+                console.warn('delete checklist attachment file failed', e);
+            }
+        }
+        await dbRun("DELETE FROM checklist_item_attachments WHERE list_id = ?", [listId]);
+
         await dbRun("DELETE FROM checklist_items WHERE list_id = ?", [listId]);
         await dbRun("DELETE FROM checklist_shares WHERE list_id = ?", [listId]);
+        await dbRun("DELETE FROM checklist_share_invites WHERE list_id = ?", [listId]);
         await dbRun("DELETE FROM checklist_columns WHERE list_id = ?", [listId]);
+        await dbRun("DELETE FROM checklist_audit_logs WHERE list_id = ?", [listId]);
         await dbRun("DELETE FROM checklists WHERE id = ?", [listId]);
         res.json({ success: true });
     } catch (e) {
@@ -1233,7 +2249,7 @@ app.post('/api/checklists/:id/columns', authenticate, async (req, res) => {
     try {
         const access = await getChecklistAccess(listId, req.user.username);
         if (!access) return res.status(404).json({ error: '清单不存在或无权限' });
-        if (access.role !== 'owner' && !access.canEdit) return res.status(403).json({ error: '无权编辑该清单' });
+        if (access.role !== 'owner') return res.status(403).json({ error: '无权编辑该清单' });
         const rows = await dbAll("SELECT MAX(sort_order) AS max_order FROM checklist_columns WHERE list_id = ?", [listId]);
         const nextOrder = (rows[0]?.max_order || 0) + 1;
         const now = Date.now();
@@ -1241,6 +2257,14 @@ app.post('/api/checklists/:id/columns', authenticate, async (req, res) => {
             "INSERT INTO checklist_columns (list_id, name, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
             [listId, name, nextOrder, now, now]
         );
+        await insertChecklistAuditLog({
+            listId,
+            actor: req.user.username,
+            type: 'column_created',
+            targetType: 'column',
+            targetId: String(result.lastID),
+            data: { name, sortOrder: nextOrder }
+        });
         res.json({ success: true, column: { id: result.lastID, listId, name, sortOrder: nextOrder, createdAt: now, updatedAt: now } });
     } catch (e) {
         res.status(500).json({ error: 'Failed to create checklist column' });
@@ -1256,15 +2280,23 @@ app.patch('/api/checklists/:id/columns/:columnId', authenticate, async (req, res
     try {
         const access = await getChecklistAccess(listId, req.user.username);
         if (!access) return res.status(404).json({ error: '清单不存在或无权限' });
-        if (access.role !== 'owner' && !access.canEdit) return res.status(403).json({ error: '无权编辑该清单' });
+        if (access.role !== 'owner') return res.status(403).json({ error: '无权编辑该清单' });
         const rows = await dbAll(
-            "SELECT id, sort_order, created_at FROM checklist_columns WHERE id = ? AND list_id = ?",
+            "SELECT id, name, sort_order, created_at FROM checklist_columns WHERE id = ? AND list_id = ?",
             [columnId, listId]
         );
         const column = rows[0];
         if (!column) return res.status(404).json({ error: '栏目不存在' });
         const now = Date.now();
         await dbRun("UPDATE checklist_columns SET name = ?, updated_at = ? WHERE id = ? AND list_id = ?", [name, now, columnId, listId]);
+        await insertChecklistAuditLog({
+            listId,
+            actor: req.user.username,
+            type: 'column_renamed',
+            targetType: 'column',
+            targetId: String(columnId),
+            data: { from: String(column.name || ''), to: name }
+        });
         res.json({ success: true, column: { id: columnId, listId, name, sortOrder: Number(column.sort_order) || 0, createdAt: column.created_at, updatedAt: now } });
     } catch (e) {
         res.status(500).json({ error: 'Failed to update checklist column' });
@@ -1278,11 +2310,25 @@ app.delete('/api/checklists/:id/columns/:columnId', authenticate, async (req, re
     try {
         const access = await getChecklistAccess(listId, req.user.username);
         if (!access) return res.status(404).json({ error: '清单不存在或无权限' });
-        if (access.role !== 'owner' && !access.canEdit) return res.status(403).json({ error: '无权编辑该清单' });
+        if (access.role !== 'owner') return res.status(403).json({ error: '无权编辑该清单' });
+        const currentRows = await dbAll(
+            "SELECT id, name FROM checklist_columns WHERE id = ? AND list_id = ?",
+            [columnId, listId]
+        );
+        if (!currentRows.length) return res.status(404).json({ error: '栏目不存在' });
+        const current = currentRows[0];
         const columns = await dbAll("SELECT id FROM checklist_columns WHERE list_id = ? AND id <> ? ORDER BY sort_order ASC, id ASC", [listId, columnId]);
         const fallbackId = columns[0]?.id || null;
         await dbRun("UPDATE checklist_items SET column_id = ? WHERE list_id = ? AND column_id = ?", [fallbackId, listId, columnId]);
         await dbRun("DELETE FROM checklist_columns WHERE id = ? AND list_id = ?", [columnId, listId]);
+        await insertChecklistAuditLog({
+            listId,
+            actor: req.user.username,
+            type: 'column_deleted',
+            targetType: 'column',
+            targetId: String(columnId),
+            data: { name: String(current.name || ''), fallbackColumnId: fallbackId ? Number(fallbackId) : null }
+        });
         res.json({ success: true, fallbackColumnId: fallbackId ? Number(fallbackId) : null });
     } catch (e) {
         res.status(500).json({ error: 'Failed to delete checklist column' });
@@ -1296,10 +2342,30 @@ app.get('/api/checklists/:id/items', authenticate, async (req, res) => {
         const access = await getChecklistAccess(listId, req.user.username);
         if (!access) return res.status(404).json({ error: '清单不存在或无权限' });
         const rows = await dbAll(
-            "SELECT id, list_id, column_id, title, completed, completed_by, notes, subtasks_json, created_at, updated_at FROM checklist_items WHERE list_id = ? ORDER BY created_at ASC",
+            "SELECT id, list_id, column_id, title, tags_json, completed, completed_by, notes, subtasks_json, created_at, updated_at FROM checklist_items WHERE list_id = ? ORDER BY created_at ASC",
             [listId]
         );
-        res.json({ items: rows.map(mapChecklistItemRow) });
+
+        const attachmentRows = await dbAll(
+            "SELECT id, list_id, item_id, original_name, mime_type, size, created_at FROM checklist_item_attachments WHERE list_id = ? ORDER BY created_at ASC",
+            [listId]
+        );
+        const attachmentsByItemId = new Map();
+        for (const row of attachmentRows) {
+            const itemId = Number(row?.item_id);
+            if (!Number.isFinite(itemId)) continue;
+            const existing = attachmentsByItemId.get(itemId) || [];
+            existing.push(mapChecklistItemAttachmentRow(row));
+            attachmentsByItemId.set(itemId, existing);
+        }
+
+        res.json({
+            items: rows.map((row) => {
+                const itemId = Number(row.id);
+                const attachments = attachmentsByItemId.get(itemId) || [];
+                return mapChecklistItemRow(row, { attachments });
+            })
+        });
     } catch (e) {
         res.status(500).json({ error: 'Failed to load checklist items' });
     }
@@ -1312,6 +2378,7 @@ app.post('/api/checklists/:id/items', authenticate, async (req, res) => {
     if (!title) return res.status(400).json({ error: 'Title is required' });
     const subtasks = normalizeChecklistSubtasks(req.body.subtasks);
     const notes = typeof req.body.notes === 'string' ? req.body.notes.trim() : '';
+    const tags = normalizeChecklistTags(req.body.tags);
     const columnId = req.body.columnId === null || req.body.columnId === undefined
         ? null
         : parseInt(req.body.columnId, 10);
@@ -1331,12 +2398,13 @@ app.post('/api/checklists/:id/items', authenticate, async (req, res) => {
         }
         const allSubtasksDone = subtasks.length ? subtasks.every(s => s.completed) : false;
         const result = await dbRun(
-            "INSERT INTO checklist_items (list_id, owner, column_id, title, completed, completed_by, notes, subtasks_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO checklist_items (list_id, owner, column_id, title, tags_json, completed, completed_by, notes, subtasks_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 listId,
                 access.list.owner,
                 targetColumnId,
                 title,
+                tags.length ? JSON.stringify(tags) : null,
                 allSubtasksDone ? 1 : 0,
                 allSubtasksDone ? req.user.username : null,
                 notes,
@@ -1345,6 +2413,20 @@ app.post('/api/checklists/:id/items', authenticate, async (req, res) => {
                 now
             ]
         );
+        await insertChecklistAuditLog({
+            listId,
+            actor: req.user.username,
+            type: 'item_created',
+            targetType: 'item',
+            targetId: String(result.lastID),
+            data: {
+                title,
+                columnId: targetColumnId === null || targetColumnId === undefined ? null : Number(targetColumnId),
+                tags,
+                completed: allSubtasksDone,
+                completedBy: allSubtasksDone ? req.user.username : ''
+            }
+        });
         res.json({
             success: true,
             item: {
@@ -1352,10 +2434,12 @@ app.post('/api/checklists/:id/items', authenticate, async (req, res) => {
                 listId,
                 columnId: targetColumnId,
                 title,
+                tags,
                 completed: allSubtasksDone,
                 completedBy: allSubtasksDone ? req.user.username : '',
                 notes,
                 subtasks,
+                attachments: [],
                 createdAt: now,
                 updatedAt: now
             }
@@ -1369,30 +2453,39 @@ app.patch('/api/checklists/:id/items/:itemId', authenticate, async (req, res) =>
     const listId = parseInt(req.params.id, 10);
     const itemId = parseInt(req.params.itemId, 10);
     if (!Number.isFinite(listId) || !Number.isFinite(itemId)) return res.status(400).json({ error: 'Invalid id' });
+    const expectedUpdatedAt = req.body?.expectedUpdatedAt;
     const title = typeof req.body.title === 'string' ? req.body.title.trim() : undefined;
     const completed = typeof req.body.completed === 'boolean' ? req.body.completed : undefined;
     const subtasks = req.body.subtasks !== undefined ? normalizeChecklistSubtasks(req.body.subtasks) : undefined;
     const notes = typeof req.body.notes === 'string' ? req.body.notes.trim() : undefined;
+    const tags = req.body.tags !== undefined ? normalizeChecklistTags(req.body.tags) : undefined;
     const columnId = req.body.columnId === null || req.body.columnId === undefined
         ? undefined
         : parseInt(req.body.columnId, 10);
-    if (title === undefined && completed === undefined && columnId === undefined && subtasks === undefined && notes === undefined) {
+    if (title === undefined && completed === undefined && columnId === undefined && subtasks === undefined && notes === undefined && tags === undefined) {
         return res.status(400).json({ error: 'No changes' });
     }
     const now = Date.now();
     try {
         const access = await getChecklistAccess(listId, req.user.username);
         if (!access) return res.status(404).json({ error: '清单不存在或无权限' });
-    const editingTitle = title !== undefined;
-    if ((editingTitle || notes !== undefined) && !access.canEdit) return res.status(403).json({ error: '无权编辑该清单' });
+        if (!access.canEdit) return res.status(403).json({ error: '无权编辑该清单' });
         const rows = await dbAll(
-            "SELECT id, list_id, column_id, title, completed, completed_by, notes, subtasks_json, created_at, updated_at FROM checklist_items WHERE id = ? AND list_id = ?",
+            "SELECT id, list_id, column_id, title, tags_json, completed, completed_by, notes, subtasks_json, created_at, updated_at FROM checklist_items WHERE id = ? AND list_id = ?",
             [itemId, listId]
         );
         const current = rows[0];
         if (!current) return res.status(404).json({ error: 'Item not found' });
+        if (expectedUpdatedAt !== undefined && Number(expectedUpdatedAt) !== Number(current.updated_at)) {
+            return res.status(409).json({
+                error: 'Conflict',
+                serverUpdatedAt: Number(current.updated_at) || 0
+            });
+        }
         const nextTitle = title !== undefined ? title : current.title;
         const nextNotes = notes !== undefined ? notes : (current.notes || '');
+        const currentTags = normalizeChecklistTags(current.tags_json);
+        const nextTags = tags !== undefined ? tags : currentTags;
         let nextSubtasks = subtasks !== undefined ? subtasks : parseChecklistSubtasks(current.subtasks_json);
         let nextCompleted = completed !== undefined ? (completed ? 1 : 0) : current.completed;
         let nextCompletedBy = completed !== undefined
@@ -1415,9 +2508,76 @@ app.patch('/api/checklists/:id/items/:itemId', authenticate, async (req, res) =>
             }
         }
         await dbRun(
-            "UPDATE checklist_items SET title = ?, completed = ?, completed_by = ?, column_id = ?, notes = ?, subtasks_json = ?, updated_at = ? WHERE id = ? AND list_id = ?",
-            [nextTitle, nextCompleted, nextCompletedBy, nextColumnId, nextNotes, JSON.stringify(nextSubtasks), now, itemId, listId]
+            "UPDATE checklist_items SET title = ?, tags_json = ?, completed = ?, completed_by = ?, column_id = ?, notes = ?, subtasks_json = ?, updated_at = ? WHERE id = ? AND list_id = ?",
+            [nextTitle, nextTags.length ? JSON.stringify(nextTags) : null, nextCompleted, nextCompletedBy, nextColumnId, nextNotes, JSON.stringify(nextSubtasks), now, itemId, listId]
         );
+
+        const wasCompleted = !!current.completed;
+        const isCompleted = !!nextCompleted;
+        const changes = {};
+        if (nextTitle !== current.title) changes.title = { from: current.title, to: nextTitle };
+        if (nextNotes !== (current.notes || '')) changes.notes = { from: current.notes || '', to: nextNotes };
+        if (JSON.stringify(currentTags) !== JSON.stringify(nextTags)) changes.tags = { from: currentTags, to: nextTags };
+        if ((current.column_id ?? null) !== (nextColumnId ?? null)) changes.columnId = { from: current.column_id ?? null, to: nextColumnId ?? null };
+        if (subtasks !== undefined) changes.subtasks = true;
+
+        if (wasCompleted !== isCompleted) {
+            const logType = isCompleted ? 'item_completed' : 'item_uncompleted';
+            await insertChecklistAuditLog({
+                listId,
+                actor: req.user.username,
+                type: logType,
+                targetType: 'item',
+                targetId: String(itemId),
+                data: { title: nextTitle, completedBy: nextCompletedBy || '', changes }
+            });
+
+            const info = await getChecklistMemberUsernames(listId);
+            const listName = info.name || String(access.list.name || '').trim();
+            const notifType = isCompleted ? 'checklist_item_completed' : 'checklist_item_uncompleted';
+            const notifTitle = isCompleted ? 'Task completed' : 'Task reopened';
+            const actor = req.user.username;
+            const body = isCompleted
+                ? `${actor} completed "${nextTitle}" in "${listName || 'Checklist'}"`
+                : `${actor} reopened "${nextTitle}" in "${listName || 'Checklist'}"`;
+            const data = {
+                listId,
+                listName: listName || '',
+                itemId,
+                title: nextTitle,
+                completed: isCompleted,
+                completedBy: nextCompletedBy || '',
+                actor
+            };
+            for (const member of info.members) {
+                if (!member || member === actor) continue;
+                await notifyUser({
+                    username: member,
+                    type: notifType,
+                    title: notifTitle,
+                    body,
+                    data,
+                    push: true,
+                    pushUrl: '/'
+                });
+            }
+        } else {
+            await insertChecklistAuditLog({
+                listId,
+                actor: req.user.username,
+                type: 'item_updated',
+                targetType: 'item',
+                targetId: String(itemId),
+                data: { changes }
+            });
+        }
+
+        const attachmentRows = await dbAll(
+            "SELECT id, original_name, mime_type, size, created_at FROM checklist_item_attachments WHERE list_id = ? AND item_id = ? ORDER BY created_at ASC",
+            [listId, itemId]
+        );
+        const attachments = attachmentRows.map(mapChecklistItemAttachmentRow);
+
         res.json({
             success: true,
             item: {
@@ -1425,10 +2585,12 @@ app.patch('/api/checklists/:id/items/:itemId', authenticate, async (req, res) =>
                 listId,
                 columnId: nextColumnId === null ? null : Number(nextColumnId),
                 title: nextTitle,
+                tags: nextTags,
                 completed: !!nextCompleted,
                 completedBy: nextCompletedBy || '',
                 notes: nextNotes,
                 subtasks: nextSubtasks,
+                attachments,
                 createdAt: current.created_at,
                 updatedAt: now
             }
@@ -1447,14 +2609,263 @@ app.delete('/api/checklists/:id/items/:itemId', authenticate, async (req, res) =
         if (!access) return res.status(404).json({ error: '清单不存在或无权限' });
         if (!access.canEdit) return res.status(403).json({ error: '无权删除该清单的条目' });
         const rows = await dbAll(
-            "SELECT id FROM checklist_items WHERE id = ? AND list_id = ?",
+            "SELECT id, title FROM checklist_items WHERE id = ? AND list_id = ?",
             [itemId, listId]
         );
-        if (!rows.length) return res.status(404).json({ error: 'Item not found' });
+        const current = rows[0];
+        if (!current) return res.status(404).json({ error: 'Item not found' });
+
+        const attachmentRows = await dbAll(
+            "SELECT id, storage_driver, storage_path FROM checklist_item_attachments WHERE list_id = ? AND item_id = ?",
+            [listId, itemId]
+        );
+        const attachmentsDeleted = attachmentRows.length;
+        for (const attachment of attachmentRows) {
+            try {
+                await deleteAttachmentFile({
+                    storageDriver: attachment.storage_driver,
+                    storagePath: attachment.storage_path
+                });
+            } catch (e) {
+                console.warn('delete checklist attachment file failed', e);
+            }
+        }
+        await dbRun("DELETE FROM checklist_item_attachments WHERE list_id = ? AND item_id = ?", [listId, itemId]);
+
         await dbRun("DELETE FROM checklist_items WHERE id = ? AND list_id = ?", [itemId, listId]);
+        await insertChecklistAuditLog({
+            listId,
+            actor: req.user.username,
+            type: 'item_deleted',
+            targetType: 'item',
+            targetId: String(itemId),
+            data: { title: String(current.title || ''), attachmentsDeleted }
+        });
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: 'Failed to delete item' });
+    }
+});
+
+// Checklist item attachments
+app.post('/api/checklists/:id/items/:itemId/attachments', authenticate, (req, res) => {
+    attachmentUpload.single('file')(req, res, async (err) => {
+        if (err) return res.status(400).json({ error: err.message || 'Upload failed' });
+        if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+        const listId = parseInt(req.params.id, 10);
+        const itemId = parseInt(req.params.itemId, 10);
+        if (!Number.isFinite(listId) || !Number.isFinite(itemId)) {
+            fs.unlink(req.file.path, () => {});
+            return res.status(400).json({ error: 'Invalid id' });
+        }
+
+        const originalName = normalizeOriginalName(req.file.originalname);
+        const mimeType = req.file.mimetype || 'application/octet-stream';
+        const size = req.file.size || 0;
+        const attachmentId = req.attachmentId;
+        const attachmentExt = req.attachmentExt || '';
+        const now = Date.now();
+
+        try {
+            const access = await getChecklistAccess(listId, req.user.username);
+            if (!access) {
+                fs.unlink(req.file.path, () => {});
+                return res.status(404).json({ error: 'Checklist not found' });
+            }
+            if (!access.canEdit) {
+                fs.unlink(req.file.path, () => {});
+                return res.status(403).json({ error: 'Forbidden' });
+            }
+
+            const itemRows = await dbAll(
+                "SELECT id, title FROM checklist_items WHERE id = ? AND list_id = ?",
+                [itemId, listId]
+            );
+            const item = itemRows[0];
+            if (!item) {
+                fs.unlink(req.file.path, () => {});
+                return res.status(404).json({ error: 'Item not found' });
+            }
+
+            const stored = await storeAttachmentFile({
+                tmpPath: req.file.path,
+                id: attachmentId,
+                ext: attachmentExt,
+                mimeType,
+                originalName,
+                size
+            });
+
+            await dbRun(
+                `INSERT INTO checklist_item_attachments
+                 (id, list_id, item_id, uploader, original_name, mime_type, size, storage_driver, storage_path, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                    attachmentId,
+                    listId,
+                    itemId,
+                    req.user.username,
+                    originalName,
+                    mimeType,
+                    size,
+                    stored.storageDriver,
+                    stored.storagePath,
+                    now
+                ]
+            );
+            await dbRun("UPDATE checklist_items SET updated_at = ? WHERE id = ? AND list_id = ?", [now, itemId, listId]);
+
+            await insertChecklistAuditLog({
+                listId,
+                actor: req.user.username,
+                type: 'item_attachment_added',
+                targetType: 'item',
+                targetId: String(itemId),
+                data: { attachmentId, name: originalName, mime: mimeType, size }
+            });
+
+            const info = await getChecklistMemberUsernames(listId);
+            const listName = info.name || String(access.list.name || '').trim();
+            const actor = req.user.username;
+            for (const member of info.members) {
+                if (!member || member === actor) continue;
+                await notifyUser({
+                    username: member,
+                    type: 'checklist_item_attachment_added',
+                    title: 'Attachment added',
+                    body: `${actor} added an attachment to "${String(item.title || '')}" in "${listName || 'Checklist'}"`,
+                    data: { listId, listName: listName || '', itemId, attachmentId, actor },
+                    push: false,
+                    pushUrl: '/'
+                });
+            }
+
+            return res.json({
+                success: true,
+                attachment: {
+                    id: attachmentId,
+                    name: originalName,
+                    mime: mimeType,
+                    size,
+                    createdAt: now
+                },
+                itemUpdatedAt: now
+            });
+        } catch (e) {
+            try { fs.unlink(req.file.path, () => {}); } catch (_) {}
+            return res.status(500).json({ error: 'Failed to upload attachment' });
+        }
+    });
+});
+
+app.delete('/api/checklists/:id/items/:itemId/attachments/:attachmentId', authenticate, async (req, res) => {
+    const listId = parseInt(req.params.id, 10);
+    const itemId = parseInt(req.params.itemId, 10);
+    const attachmentId = String(req.params.attachmentId || '').trim();
+    if (!Number.isFinite(listId) || !Number.isFinite(itemId) || !attachmentId) {
+        return res.status(400).json({ error: 'Invalid id' });
+    }
+
+    const now = Date.now();
+    try {
+        const access = await getChecklistAccess(listId, req.user.username);
+        if (!access) return res.status(404).json({ error: 'Checklist not found' });
+        if (!access.canEdit) return res.status(403).json({ error: 'Forbidden' });
+
+        const rows = await dbAll(
+            "SELECT id, list_id, item_id, original_name, mime_type, size, storage_driver, storage_path FROM checklist_item_attachments WHERE id = ?",
+            [attachmentId]
+        );
+        const attachment = rows[0];
+        if (!attachment || Number(attachment.list_id) !== listId || Number(attachment.item_id) !== itemId) {
+            return res.status(404).json({ error: 'Attachment not found' });
+        }
+
+        await dbRun(
+            "DELETE FROM checklist_item_attachments WHERE id = ? AND list_id = ? AND item_id = ?",
+            [attachmentId, listId, itemId]
+        );
+        await dbRun("UPDATE checklist_items SET updated_at = ? WHERE id = ? AND list_id = ?", [now, itemId, listId]);
+
+        await insertChecklistAuditLog({
+            listId,
+            actor: req.user.username,
+            type: 'item_attachment_removed',
+            targetType: 'item',
+            targetId: String(itemId),
+            data: { attachmentId, name: String(attachment.original_name || ''), mime: String(attachment.mime_type || ''), size: Number(attachment.size) || 0 }
+        });
+
+        const info = await getChecklistMemberUsernames(listId);
+        const listName = info.name || String(access.list.name || '').trim();
+        const actor = req.user.username;
+        for (const member of info.members) {
+            if (!member || member === actor) continue;
+            await notifyUser({
+                username: member,
+                type: 'checklist_item_attachment_removed',
+                title: 'Attachment removed',
+                body: `${actor} removed an attachment in "${listName || 'Checklist'}"`,
+                data: { listId, listName: listName || '', itemId, attachmentId, actor },
+                push: false,
+                pushUrl: '/'
+            });
+        }
+
+        try {
+            await deleteAttachmentFile({
+                storageDriver: attachment.storage_driver,
+                storagePath: attachment.storage_path
+            });
+        } catch (e) {
+            console.warn('delete checklist attachment file failed', e);
+        }
+
+        return res.json({ success: true, itemUpdatedAt: now });
+    } catch (e) {
+        return res.status(500).json({ error: 'Failed to delete attachment' });
+    }
+});
+
+app.get('/api/checklists/:id/items/:itemId/attachments/:attachmentId/download', authenticate, async (req, res) => {
+    const listId = parseInt(req.params.id, 10);
+    const itemId = parseInt(req.params.itemId, 10);
+    const attachmentId = String(req.params.attachmentId || '').trim();
+    if (!Number.isFinite(listId) || !Number.isFinite(itemId) || !attachmentId) {
+        return res.status(400).json({ error: 'Invalid id' });
+    }
+
+    try {
+        const access = await getChecklistAccess(listId, req.user.username);
+        if (!access) return res.status(404).json({ error: 'Checklist not found' });
+
+        const rows = await dbAll(
+            "SELECT id, list_id, item_id, original_name, mime_type, size, storage_driver, storage_path FROM checklist_item_attachments WHERE id = ? AND list_id = ? AND item_id = ?",
+            [attachmentId, listId, itemId]
+        );
+        const attachment = rows[0];
+        if (!attachment) return res.status(404).json({ error: 'Attachment not found' });
+
+        const safeName = normalizeOriginalName(attachment.original_name);
+        res.setHeader('Content-Disposition', buildDownloadDisposition(safeName));
+        res.setHeader('Content-Type', attachment.mime_type || 'application/octet-stream');
+
+        if (attachment.storage_driver === 'local') {
+            const absPath = path.join(ATTACHMENTS_DIR, attachment.storage_path);
+            if (!fs.existsSync(absPath)) return res.status(404).json({ error: 'File missing' });
+            return res.sendFile(absPath);
+        }
+
+        if (!ATTACHMENTS_S3_BUCKET) return res.status(500).json({ error: 'Storage not configured' });
+        const result = await s3Client.send(new GetObjectCommand({
+            Bucket: ATTACHMENTS_S3_BUCKET,
+            Key: attachment.storage_path
+        }));
+        if (result.ContentLength) res.setHeader('Content-Length', result.ContentLength);
+        await streamPipeline(result.Body, res);
+    } catch (e) {
+        return res.status(500).json({ error: 'Failed to download attachment' });
     }
 });
 
@@ -1500,6 +2911,7 @@ app.post('/api/checklists/:id/shares', authenticate, async (req, res) => {
     const sharedUser = String(req.body.user || '').trim();
     if (!sharedUser) return res.status(400).json({ error: 'User is required' });
     const canEdit = typeof req.body.canEdit === 'boolean' ? req.body.canEdit : true;
+    return res.status(410).json({ error: 'Use /api/checklists/:id/invites' });
     const now = Date.now();
     try {
         const owned = await assertChecklistOwner(listId, req.user.username);
@@ -1532,6 +2944,24 @@ app.patch('/api/checklists/:id/shares/:user', authenticate, async (req, res) => 
         if (!share) return res.status(404).json({ error: '共享用户不存在' });
         const nextEdit = canEdit === undefined ? share.can_edit : (canEdit ? 1 : 0);
         await dbRun("UPDATE checklist_shares SET can_edit = ? WHERE list_id = ? AND shared_user = ?", [nextEdit, listId, user]);
+        const role = nextEdit ? CHECKLIST_MEMBER_ROLES.editor : CHECKLIST_MEMBER_ROLES.readonly;
+        await insertChecklistAuditLog({
+            listId,
+            actor: req.user.username,
+            type: 'member_role_changed',
+            targetType: 'member',
+            targetId: user,
+            data: { role }
+        });
+        await notifyUser({
+            username: user,
+            type: 'checklist_member_role_changed',
+            title: 'Checklist role updated',
+            body: `Your role in "${owned.name || 'Checklist'}" is now ${role}`,
+            data: { listId, listName: owned.name || '', role, actor: req.user.username },
+            push: true,
+            pushUrl: '/'
+        });
         res.json({ success: true, user, canEdit: !!nextEdit });
     } catch (e) {
         res.status(500).json({ error: 'Failed to update share' });
@@ -1546,10 +2976,133 @@ app.delete('/api/checklists/:id/shares/:user', authenticate, async (req, res) =>
     try {
         const owned = await assertChecklistOwner(listId, req.user.username);
         if (!owned) return res.status(404).json({ error: '清单不存在或无权限' });
+        const rows = await dbAll("SELECT id FROM checklist_shares WHERE list_id = ? AND shared_user = ?", [listId, user]);
+        if (!rows.length) return res.status(404).json({ error: '共享用户不存在' });
         await dbRun("DELETE FROM checklist_shares WHERE list_id = ? AND shared_user = ?", [listId, user]);
+        await insertChecklistAuditLog({
+            listId,
+            actor: req.user.username,
+            type: 'member_removed',
+            targetType: 'member',
+            targetId: user,
+            data: {}
+        });
+        await notifyUser({
+            username: user,
+            type: 'checklist_member_removed',
+            title: 'Removed from checklist',
+            body: `You were removed from "${owned.name || 'Checklist'}"`,
+            data: { listId, listName: owned.name || '', actor: req.user.username },
+            push: true,
+            pushUrl: '/'
+        });
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: 'Failed to remove share' });
+    }
+});
+
+app.post('/api/checklists/:id/leave', authenticate, async (req, res) => {
+    const listId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(listId)) return res.status(400).json({ error: 'Invalid checklist id' });
+    try {
+        const access = await getChecklistAccess(listId, req.user.username);
+        if (!access) return res.status(404).json({ error: '清单不存在或无权限' });
+        if (access.role === 'owner') {
+            return res.status(400).json({ error: 'Owner must transfer ownership before leaving' });
+        }
+        await dbRun("DELETE FROM checklist_shares WHERE list_id = ? AND shared_user = ?", [listId, req.user.username]);
+        await insertChecklistAuditLog({
+            listId,
+            actor: req.user.username,
+            type: 'member_left',
+            targetType: 'member',
+            targetId: req.user.username,
+            data: {}
+        });
+        await notifyUser({
+            username: String(access.list.owner || ''),
+            type: 'checklist_member_left',
+            title: 'Member left',
+            body: `${req.user.username} left "${access.list.name || 'Checklist'}"`,
+            data: { listId, listName: access.list.name || '', member: req.user.username },
+            push: true,
+            pushUrl: '/'
+        });
+        return res.json({ success: true });
+    } catch (e) {
+        return res.status(500).json({ error: 'Failed to leave checklist' });
+    }
+});
+
+app.post('/api/checklists/:id/transfer-owner', authenticate, async (req, res) => {
+    const listId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(listId)) return res.status(400).json({ error: 'Invalid checklist id' });
+
+    const userKey = req.body?.userKey ?? req.body?.user_key;
+    const user = req.body?.user ?? req.body?.username;
+
+    let newOwner = null;
+    if (userKey) newOwner = await resolveUserKey(userKey);
+    if (!newOwner && user) newOwner = String(user).trim();
+    if (!newOwner) return res.status(400).json({ error: 'New owner is required' });
+
+    const now = Date.now();
+    try {
+        const owned = await assertChecklistOwner(listId, req.user.username);
+        if (!owned) return res.status(404).json({ error: '清单不存在或无权限' });
+        if (newOwner === req.user.username) return res.status(400).json({ error: 'New owner must be different' });
+
+        const userRows = await dbAll("SELECT username FROM users WHERE username = ?", [newOwner]);
+        if (!userRows.length) return res.status(404).json({ error: 'User not found' });
+
+        const memberRows = await dbAll(
+            "SELECT id FROM checklist_shares WHERE list_id = ? AND shared_user = ?",
+            [listId, newOwner]
+        );
+        if (!memberRows.length) {
+            return res.status(400).json({ error: 'New owner must already be a member' });
+        }
+
+        await dbRun('BEGIN');
+        await dbRun("UPDATE checklists SET owner = ?, updated_at = ? WHERE id = ?", [newOwner, now, listId]);
+        await dbRun("UPDATE checklist_items SET owner = ? WHERE list_id = ?", [newOwner, listId]);
+        await dbRun("UPDATE checklist_shares SET owner = ? WHERE list_id = ?", [newOwner, listId]);
+        await dbRun("DELETE FROM checklist_shares WHERE list_id = ? AND shared_user = ?", [listId, newOwner]);
+        await dbRun(
+            "INSERT OR REPLACE INTO checklist_shares (list_id, owner, shared_user, can_edit, created_at) VALUES (?, ?, ?, ?, ?)",
+            [listId, newOwner, req.user.username, 1, now]
+        );
+        await dbRun('COMMIT');
+
+        await insertChecklistAuditLog({
+            listId,
+            actor: req.user.username,
+            type: 'owner_transferred',
+            targetType: 'list',
+            targetId: String(listId),
+            data: { from: req.user.username, to: newOwner }
+        });
+
+        const info = await getChecklistMemberUsernames(listId);
+        const listName = info.name || owned.name || '';
+        for (const member of info.members) {
+            if (!member || member === req.user.username) continue;
+            await notifyUser({
+                username: member,
+                type: 'checklist_owner_transferred',
+                title: 'Checklist owner transferred',
+                body: `Owner of "${listName || 'Checklist'}" is now ${newOwner}`,
+                data: { listId, listName, from: req.user.username, to: newOwner },
+                push: true,
+                pushUrl: '/'
+            });
+        }
+
+        return res.json({ success: true, owner: newOwner });
+    } catch (e) {
+        try { await dbRun('ROLLBACK'); } catch (rollbackErr) {}
+        return res.status(500).json({ error: 'Failed to transfer owner' });
     }
 });
 
@@ -1791,7 +3344,7 @@ app.get('/api/v2/export', authenticate, async (req, res) => {
         const listIds = checklistRows.map((r) => Number(r.id)).filter((id) => Number.isFinite(id) && id > 0);
 
         const checklistItemsRows = await dbAll(
-            "SELECT id, list_id, column_id, title, completed, completed_by, notes, subtasks_json, created_at, updated_at FROM checklist_items WHERE owner = ? ORDER BY id ASC",
+            "SELECT id, list_id, column_id, title, tags_json, completed, completed_by, notes, subtasks_json, created_at, updated_at FROM checklist_items WHERE owner = ? ORDER BY id ASC",
             [username]
         );
         const checklistItems = checklistItemsRows.map(mapChecklistItemRow);
@@ -2099,6 +3652,7 @@ app.post('/api/v2/import', authenticate, async (req, res) => {
             const columnId = Number.isFinite(columnIdRaw) ? columnIdRaw : null;
             const title = String(item?.title || '').trim();
             if (!Number.isFinite(id) || id <= 0 || !Number.isFinite(listId) || listId <= 0 || !title) continue;
+            const tags = normalizeChecklistTags(item?.tags ?? item?.tags_json);
             const completed = item?.completed ? 1 : 0;
             const completedBy = String(item?.completedBy ?? item?.completed_by ?? '').trim();
             const notes = String(item?.notes || '').trim();
@@ -2107,9 +3661,9 @@ app.post('/api/v2/import', authenticate, async (req, res) => {
             const updatedAt = parseIntSafe(item?.updatedAt ?? item?.updated_at) ?? now;
             await dbRun(
                 `INSERT OR REPLACE INTO checklist_items
-                (id, list_id, owner, column_id, title, completed, completed_by, subtasks_json, notes, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [id, listId, username, columnId, title, completed, completedBy || null, JSON.stringify(subtasks), notes, createdAt, updatedAt]
+                (id, list_id, owner, column_id, title, tags_json, completed, completed_by, subtasks_json, notes, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [id, listId, username, columnId, title, tags.length ? JSON.stringify(tags) : null, completed, completedBy || null, JSON.stringify(subtasks), notes, createdAt, updatedAt]
             );
         }
 

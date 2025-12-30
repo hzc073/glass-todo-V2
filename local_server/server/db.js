@@ -206,6 +206,7 @@ db.serialize(() => {
         owner TEXT NOT NULL,
         column_id INTEGER,
         title TEXT NOT NULL,
+        tags_json TEXT,
         completed INTEGER NOT NULL DEFAULT 0,
         completed_by TEXT,
         subtasks_json TEXT,
@@ -215,6 +216,22 @@ db.serialize(() => {
         FOREIGN KEY(list_id) REFERENCES checklists(id) ON DELETE CASCADE
     )`);
     db.run("CREATE INDEX IF NOT EXISTS idx_checklist_items_owner_list ON checklist_items(owner, list_id)");
+
+    db.run(`CREATE TABLE IF NOT EXISTS checklist_item_attachments (
+        id TEXT PRIMARY KEY,
+        list_id INTEGER NOT NULL,
+        item_id INTEGER NOT NULL,
+        uploader TEXT NOT NULL,
+        original_name TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        storage_driver TEXT NOT NULL,
+        storage_path TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY(list_id) REFERENCES checklists(id) ON DELETE CASCADE,
+        FOREIGN KEY(item_id) REFERENCES checklist_items(id) ON DELETE CASCADE
+    )`);
+    db.run("CREATE INDEX IF NOT EXISTS idx_checklist_item_attachments_item ON checklist_item_attachments(list_id, item_id, created_at)");
 
     db.run(`CREATE TABLE IF NOT EXISTS checklist_columns (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -238,6 +255,61 @@ db.serialize(() => {
         FOREIGN KEY(list_id) REFERENCES checklists(id) ON DELETE CASCADE
     )`);
     db.run("CREATE INDEX IF NOT EXISTS idx_checklist_shares_user ON checklist_shares(shared_user)");
+
+    // Public user keys (avoid exposing usernames in search results)
+    db.run(`CREATE TABLE IF NOT EXISTS user_public_ids (
+        user_key TEXT PRIMARY KEY,
+        username TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL
+    )`);
+    db.run("CREATE INDEX IF NOT EXISTS idx_user_public_ids_username ON user_public_ids(username)");
+
+    // Checklist share invitations (invite -> accept flow)
+    db.run(`CREATE TABLE IF NOT EXISTS checklist_share_invites (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        list_id INTEGER NOT NULL,
+        inviter TEXT NOT NULL,
+        invitee TEXT NOT NULL,
+        role TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        responded_at INTEGER,
+        FOREIGN KEY(list_id) REFERENCES checklists(id) ON DELETE CASCADE
+    )`);
+    db.run("CREATE INDEX IF NOT EXISTS idx_checklist_invites_list ON checklist_share_invites(list_id, created_at)");
+    db.run("CREATE INDEX IF NOT EXISTS idx_checklist_invites_invitee ON checklist_share_invites(invitee, status, created_at)");
+
+    // Checklist audit logs (operation records)
+    db.run(`CREATE TABLE IF NOT EXISTS checklist_audit_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        list_id INTEGER NOT NULL,
+        actor TEXT NOT NULL,
+        type TEXT NOT NULL,
+        target_type TEXT,
+        target_id TEXT,
+        data_json TEXT,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY(list_id) REFERENCES checklists(id) ON DELETE CASCADE
+    )`);
+    db.run("CREATE INDEX IF NOT EXISTS idx_checklist_audit_list_time ON checklist_audit_logs(list_id, created_at)");
+    db.run("CREATE INDEX IF NOT EXISTS idx_checklist_audit_actor_time ON checklist_audit_logs(actor, created_at)");
+    db.run("CREATE INDEX IF NOT EXISTS idx_checklist_audit_time ON checklist_audit_logs(created_at)");
+
+    // In-app notifications inbox
+    db.run(`CREATE TABLE IF NOT EXISTS user_notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL,
+        type TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        data_json TEXT,
+        created_at INTEGER NOT NULL,
+        read_at INTEGER
+    )`);
+    db.run("CREATE INDEX IF NOT EXISTS idx_user_notifications_user_time ON user_notifications(username, created_at)");
+    db.run("CREATE INDEX IF NOT EXISTS idx_user_notifications_user_read ON user_notifications(username, read_at)");
     
     // 自动迁移：检查 is_admin 字段
     db.all("PRAGMA table_info(users)", (err, rows) => {
@@ -363,6 +435,10 @@ db.serialize(() => {
 
     db.all("PRAGMA table_info(checklist_items)", (err, rows) => {
         if (!rows) return;
+        if (!rows.some(r => r.name === 'tags_json')) {
+            console.log(">> DB Migration: Adding checklist_items.tags_json column...");
+            db.run("ALTER TABLE checklist_items ADD COLUMN tags_json TEXT");
+        }
         if (!rows.some(r => r.name === 'completed_by')) {
             console.log(">> DB Migration: Adding checklist_items.completed_by column...");
             db.run("ALTER TABLE checklist_items ADD COLUMN completed_by TEXT");

@@ -36,6 +36,9 @@ import 'time_stats_sheet.dart';
 import 'time_tracking_view.dart';
 import 'workspace_view.dart';
 import 'widgets/empty_state.dart';
+import 'widgets/checklist_item_detail_dialog.dart';
+import 'widgets/checklist_sharing_dialog.dart';
+import 'widgets/notifications_dialog.dart';
 import 'widgets/staggered_fade_slide.dart';
 import 'widgets/task_card.dart';
 import 'widgets/time_activity_editor.dart';
@@ -496,6 +499,40 @@ class _TaskPageState extends State<TaskPage> {
     super.dispose();
   }
 
+  Future<void> _openNotificationsDialog() async {
+    if (_saving) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => NotificationsDialog(
+        apiClient: widget.apiClient,
+        onChecklistChanged: () {
+          unawaited(_loadChecklists());
+        },
+      ),
+    );
+  }
+
+  Future<void> _openChecklistSharingDialog(ChecklistList list) async {
+    if (_saving) return;
+    final changed = await showDialog<bool>(
+          context: context,
+          builder: (context) => ChecklistSharingDialog(
+            apiClient: widget.apiClient,
+            list: list,
+            currentUsername: widget.username,
+          ),
+        ) ??
+        false;
+    if (!mounted) return;
+    if (!changed) return;
+    await _loadChecklists();
+    if (!mounted) return;
+    final activeId = _activeChecklistId;
+    if (activeId != null) {
+      await _loadChecklistItems(activeId);
+    }
+  }
+
   bool _allowShortcutInTextFields(bool allowWhenEditing) {
     if (allowWhenEditing) return true;
     final focusedContext = FocusManager.instance.primaryFocus?.context;
@@ -909,6 +946,11 @@ class _TaskPageState extends State<TaskPage> {
                 ),
                 const SizedBox(width: 8),
                 IconButton(
+                  onPressed: _openNotificationsDialog,
+                  icon: const Icon(Icons.notifications_none),
+                  tooltip: '通知',
+                ),
+                IconButton(
                   onPressed: widget.onOpenSettings,
                   icon: const Icon(Icons.settings),
                   tooltip: '设置',
@@ -920,6 +962,11 @@ class _TaskPageState extends State<TaskPage> {
                 ),
               ] else ...[
                 const SizedBox(width: 8),
+                IconButton(
+                  onPressed: _openNotificationsDialog,
+                  icon: const Icon(Icons.notifications_none),
+                  tooltip: '通知',
+                ),
                 IconButton(
                   onPressed: widget.onOpenSettings,
                   icon: const Icon(Icons.settings),
@@ -1099,7 +1146,7 @@ class _TaskPageState extends State<TaskPage> {
 
     if (isTasks) {
       final isTrashView = _showTrash;
-      final isChecklistView = false;
+      final isChecklistView = !isTrashView && _activeChecklistId != null;
       final hasSearch = _searchQuery.trim().isNotEmpty;
       final emptySubtitle = hasSearch ? '没有找到匹配的任务。' : '';
       final trashCount = _tasks.where((task) => task.deletedAt != null).length;
@@ -1156,6 +1203,7 @@ class _TaskPageState extends State<TaskPage> {
                   item: item,
                   saving: _saving,
                   onToggle: () => _toggleChecklistItem(item),
+                  onOpen: () => _openChecklistItemDetail(item),
                   onDelete: () => _confirmDeleteChecklistItem(item),
                 ),
               );
@@ -1257,6 +1305,14 @@ class _TaskPageState extends State<TaskPage> {
                       ),
                 ),
                 const Spacer(),
+                TextButton.icon(
+                  onPressed: _saving || activeChecklist == null
+                      ? null
+                      : () => _openChecklistSharingDialog(activeChecklist),
+                  icon: const Icon(Icons.group_outlined, size: 18),
+                  label: const Text('Share'),
+                ),
+                const SizedBox(width: 8),
                 TextButton(
                   onPressed: _saving ? null : _closeChecklistView,
                   child: const Text('返回任务'),
@@ -2244,7 +2300,20 @@ class _TaskPageState extends State<TaskPage> {
   }
 
   Widget _buildChecklistQuickAddField(BuildContext context) {
-    final disabled = _saving || _activeChecklistId == null;
+    final activeId = _activeChecklistId;
+    ChecklistList? activeChecklist;
+    if (activeId != null) {
+      for (final list in _checklists) {
+        if (list.id == activeId) {
+          activeChecklist = list;
+          break;
+        }
+      }
+    }
+    final disabled = _saving ||
+        activeId == null ||
+        activeChecklist == null ||
+        !activeChecklist.canEdit;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
       decoration: BoxDecoration(
@@ -2262,7 +2331,11 @@ class _TaskPageState extends State<TaskPage> {
               focusNode: _checklistAddFocusNode,
               enabled: !disabled,
               decoration: InputDecoration(
-                hintText: disabled ? '选择一个清单后添加事项' : '输入清单事项，回车添加',
+                hintText: disabled
+                    ? (activeId == null
+                        ? '选择一个清单后添加事项'
+                        : '只读成员无法添加事项')
+                    : '输入清单事项，回车添加',
                 border: InputBorder.none,
                 isDense: true,
                 filled: false,
@@ -3540,6 +3613,15 @@ class _TaskPageState extends State<TaskPage> {
     final listId = _activeChecklistId;
     if (title.isEmpty || listId == null || _saving) return;
 
+    final active = _checklists.where((list) => list.id == listId).toList();
+    final canEdit = active.isNotEmpty && active.first.canEdit;
+    if (!canEdit) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('只读成员无法编辑清单。')),
+      );
+      return;
+    }
+
     _checklistAddController.clear();
     FocusManager.instance.primaryFocus?.unfocus();
     setState(() => _saving = true);
@@ -3562,12 +3644,21 @@ class _TaskPageState extends State<TaskPage> {
 
   Future<void> _toggleChecklistItem(ChecklistItem item) async {
     if (_saving) return;
+    final list = _checklists.where((l) => l.id == item.listId).toList();
+    final canEdit = list.isNotEmpty && list.first.canEdit;
+    if (!canEdit) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('只读成员无法编辑清单。')),
+      );
+      return;
+    }
     setState(() => _saving = true);
     try {
       final updated = await widget.apiClient.updateChecklistItem(
         listId: item.listId,
         itemId: item.id,
         completed: !item.completed,
+        expectedUpdatedAt: item.updatedAt,
       );
       if (!mounted) return;
       setState(() {
@@ -3577,6 +3668,18 @@ class _TaskPageState extends State<TaskPage> {
       });
     } on UnauthorizedException {
       widget.onLogout();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      if (e.statusCode == 409) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('该事项已被他人修改，请刷新后重试。')),
+        );
+        await _loadChecklistItems(item.listId);
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('更新清单事项失败。')),
+      );
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -3587,8 +3690,37 @@ class _TaskPageState extends State<TaskPage> {
     }
   }
 
+  Future<void> _openChecklistItemDetail(ChecklistItem item) async {
+    if (_saving) return;
+    final list = _findChecklistById(item.listId);
+    if (list == null) return;
+    final updated = await showDialog<ChecklistItem?>(
+      context: context,
+      builder: (context) => ChecklistItemDetailDialog(
+        apiClient: widget.apiClient,
+        list: list,
+        item: item,
+      ),
+    );
+    if (!mounted) return;
+    if (updated == null) return;
+    setState(() {
+      final items = _checklistItems[item.listId] ?? <ChecklistItem>[];
+      _checklistItems[item.listId] =
+          items.map((it) => it.id == item.id ? updated : it).toList();
+    });
+  }
+
   Future<void> _confirmDeleteChecklistItem(ChecklistItem item) async {
     if (_saving) return;
+    final list = _checklists.where((l) => l.id == item.listId).toList();
+    final canEdit = list.isNotEmpty && list.first.canEdit;
+    if (!canEdit) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('只读成员无法编辑清单。')),
+      );
+      return;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -6087,12 +6219,14 @@ class _ChecklistItemCard extends StatelessWidget {
     required this.item,
     required this.saving,
     required this.onToggle,
+    required this.onOpen,
     required this.onDelete,
   });
 
   final ChecklistItem item;
   final bool saving;
   final VoidCallback onToggle;
+  final VoidCallback onOpen;
   final VoidCallback onDelete;
 
   @override
@@ -6117,15 +6251,55 @@ class _ChecklistItemCard extends StatelessWidget {
             ),
             const SizedBox(width: 6),
             Expanded(
-              child: Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
+              child: InkWell(
+                onTap: saving ? null : onOpen,
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
                     Text(
                       item.title.isEmpty ? '未命名事项' : item.title,
                       style: titleStyle,
                     ),
+                    if (item.completed && item.completedBy.trim().isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        'Completed by ${item.completedBy}',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: AppColors.inkSoft,
+                            ),
+                      ),
+                    ],
+                    if (item.subtasks.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        'Subtasks: ${item.subtasks.where((s) => s.completed).length}/${item.subtasks.length}',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: AppColors.inkSoft,
+                            ),
+                      ),
+                    ],
+                    if (item.tags.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        'Tags: ${item.tags.join(', ')}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: AppColors.inkSoft,
+                            ),
+                      ),
+                    ],
+                    if (item.attachments.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        'Attachments: ${item.attachments.length}',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: AppColors.inkSoft,
+                            ),
+                      ),
+                    ],
                     if (item.notes.trim().isNotEmpty) ...[
                       const SizedBox(height: 6),
                       Text(
@@ -6137,7 +6311,8 @@ class _ChecklistItemCard extends StatelessWidget {
                             ),
                       ),
                     ],
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),

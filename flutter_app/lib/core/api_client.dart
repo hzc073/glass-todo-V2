@@ -5,7 +5,11 @@ import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 
 import '../models/checklist.dart';
+import '../models/checklist_invite.dart';
+import '../models/checklist_log_entry.dart';
+import '../models/checklist_share.dart';
 import '../models/holiday_cn.dart';
+import '../models/in_app_notification.dart';
 import '../models/pomodoro_session.dart';
 import '../models/pomodoro_settings.dart';
 import '../models/pomodoro_state.dart';
@@ -16,6 +20,7 @@ import '../models/time_entry.dart';
 import '../models/time_goals.dart';
 import '../models/time_stats.dart';
 import '../models/time_stats_detail.dart';
+import '../models/user_candidate.dart';
 import '../models/user_settings.dart';
 import 'auth_store.dart';
 
@@ -31,6 +36,16 @@ class ApiException implements Exception {
 
 class UnauthorizedException extends ApiException {
   UnauthorizedException() : super(401, 'Unauthorized');
+}
+
+class ChecklistItemAttachmentUploadResult {
+  ChecklistItemAttachmentUploadResult({
+    required this.attachment,
+    required this.itemUpdatedAt,
+  });
+
+  final ChecklistItemAttachment attachment;
+  final int itemUpdatedAt;
 }
 
 class ApiClient {
@@ -360,11 +375,15 @@ class ApiClient {
     required String title,
     String? notes,
     int? columnId,
+    List<String>? tags,
+    List<ChecklistSubtask>? subtasks,
   }) async {
     final payload = <String, dynamic>{
       'title': title,
       if (notes != null) 'notes': notes,
       if (columnId != null) 'columnId': columnId,
+      if (tags != null) 'tags': tags,
+      if (subtasks != null) 'subtasks': subtasks.map((s) => s.toJson()).toList(),
     };
     final res = await _withTimeout(http.post(
       _uri('/api/checklists/$listId/items'),
@@ -382,11 +401,19 @@ class ApiClient {
     String? title,
     bool? completed,
     String? notes,
+    List<String>? tags,
+    List<ChecklistSubtask>? subtasks,
+    int? expectedUpdatedAt,
   }) async {
     final payload = <String, dynamic>{};
     if (title != null) payload['title'] = title;
     if (completed != null) payload['completed'] = completed;
     if (notes != null) payload['notes'] = notes;
+    if (tags != null) payload['tags'] = tags;
+    if (subtasks != null) {
+      payload['subtasks'] = subtasks.map((s) => s.toJson()).toList();
+    }
+    if (expectedUpdatedAt != null) payload['expectedUpdatedAt'] = expectedUpdatedAt;
     final res = await _withTimeout(http.patch(
       _uri('/api/checklists/$listId/items/$itemId'),
       headers: _headers(),
@@ -405,6 +432,366 @@ class ApiClient {
       http.delete(_uri('/api/checklists/$listId/items/$itemId'), headers: _headers()),
     );
     _throwIfError(res);
+  }
+
+  Future<ChecklistItemAttachmentUploadResult> uploadChecklistItemAttachment({
+    required int listId,
+    required int itemId,
+    required String filename,
+    required Uint8List bytes,
+  }) async {
+    final request = http.MultipartRequest(
+      'POST',
+      _uri('/api/checklists/$listId/items/$itemId/attachments'),
+    );
+    request.headers.addAll(_headers(json: false));
+    request.files.add(
+      http.MultipartFile.fromBytes(
+        'file',
+        bytes,
+        filename: filename,
+      ),
+    );
+
+    final res = await _withTimeout(request.send(), timeout: _uploadTimeout);
+    final body =
+        await _withTimeout(res.stream.bytesToString(), timeout: _uploadTimeout);
+    if (res.statusCode == 401) {
+      throw UnauthorizedException();
+    }
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw ApiException(res.statusCode, body);
+    }
+
+    final decoded = jsonDecode(body);
+    if (decoded is! Map<String, dynamic>) {
+      throw ApiException(res.statusCode, body);
+    }
+    final attachment = decoded['attachment'];
+    if (attachment is! Map<String, dynamic>) {
+      throw ApiException(res.statusCode, body);
+    }
+    final itemUpdatedAtRaw = decoded['itemUpdatedAt'] ?? decoded['item_updated_at'];
+    final itemUpdatedAt = itemUpdatedAtRaw is int
+        ? itemUpdatedAtRaw
+        : (itemUpdatedAtRaw is num
+            ? itemUpdatedAtRaw.toInt()
+            : int.tryParse(itemUpdatedAtRaw?.toString() ?? ''));
+    return ChecklistItemAttachmentUploadResult(
+      attachment: ChecklistItemAttachment.fromJson(attachment),
+      itemUpdatedAt: itemUpdatedAt ?? 0,
+    );
+  }
+
+  Future<int?> deleteChecklistItemAttachment({
+    required int listId,
+    required int itemId,
+    required String attachmentId,
+  }) async {
+    final res = await _withTimeout(
+      http.delete(
+        _uri('/api/checklists/$listId/items/$itemId/attachments/$attachmentId'),
+        headers: _headers(),
+      ),
+      timeout: _uploadTimeout,
+    );
+    _throwIfError(res);
+    final json = _decode(res);
+    final updatedRaw = json['itemUpdatedAt'] ?? json['item_updated_at'];
+    if (updatedRaw is int) return updatedRaw;
+    if (updatedRaw is num) return updatedRaw.toInt();
+    return int.tryParse(updatedRaw?.toString() ?? '');
+  }
+
+  Future<Uint8List> downloadChecklistItemAttachmentBytes({
+    required int listId,
+    required int itemId,
+    required String attachmentId,
+  }) async {
+    final res = await _withTimeout(
+      http.get(
+        _uri('/api/checklists/$listId/items/$itemId/attachments/$attachmentId/download'),
+        headers: _headers(json: false),
+      ),
+      timeout: _uploadTimeout,
+    );
+    _throwIfError(res);
+    return res.bodyBytes;
+  }
+
+  // Checklist sharing (invite -> accept flow)
+  Future<List<UserCandidate>> searchUsers({
+    required String query,
+    int limit = 20,
+    int offset = 0,
+  }) async {
+    final q = query.trim();
+    if (q.isEmpty) return <UserCandidate>[];
+    final uri = _uri('/api/users/search').replace(queryParameters: {
+      'q': q,
+      'limit': limit.toString(),
+      'offset': offset.toString(),
+    });
+    final res = await _withTimeout(http.get(uri, headers: _headers()));
+    _throwIfError(res);
+    final json = _decode(res);
+    final list = json['users'];
+    if (list is List) {
+      return list
+          .whereType<Map<String, dynamic>>()
+          .map(UserCandidate.fromJson)
+          .toList();
+    }
+    return <UserCandidate>[];
+  }
+
+  Future<List<UserCandidate>> getCollabCandidates({int limit = 20}) async {
+    final uri = _uri('/api/users/collab-candidates').replace(queryParameters: {
+      'limit': limit.toString(),
+    });
+    final res = await _withTimeout(http.get(uri, headers: _headers()));
+    _throwIfError(res);
+    final json = _decode(res);
+    final list = json['users'];
+    if (list is List) {
+      return list
+          .whereType<Map<String, dynamic>>()
+          .map(UserCandidate.fromJson)
+          .toList();
+    }
+    return <UserCandidate>[];
+  }
+
+  Future<List<ChecklistInvite>> getChecklistInvites(
+    int listId, {
+    int limit = 100,
+    int offset = 0,
+  }) async {
+    final uri = _uri('/api/checklists/$listId/invites').replace(queryParameters: {
+      'limit': limit.toString(),
+      'offset': offset.toString(),
+    });
+    final res = await _withTimeout(http.get(uri, headers: _headers()));
+    _throwIfError(res);
+    final json = _decode(res);
+    final list = json['invites'];
+    if (list is List) {
+      return list
+          .whereType<Map<String, dynamic>>()
+          .map(ChecklistInvite.fromJson)
+          .toList();
+    }
+    return <ChecklistInvite>[];
+  }
+
+  Future<List<ChecklistInvite>> inviteUsersToChecklist({
+    required int listId,
+    required List<String> userKeys,
+    required String role,
+    int expiresInDays = 7,
+  }) async {
+    final payload = {
+      'expiresInDays': expiresInDays,
+      'invites': userKeys
+          .where((key) => key.trim().isNotEmpty)
+          .map((key) => {'userKey': key.trim(), 'role': role})
+          .toList(),
+    };
+    final res = await _withTimeout(http.post(
+      _uri('/api/checklists/$listId/invites'),
+      headers: _headers(),
+      body: jsonEncode(payload),
+    ));
+    _throwIfError(res);
+    final json = _decode(res);
+    final list = json['invites'];
+    if (list is List) {
+      return list
+          .whereType<Map<String, dynamic>>()
+          .map(ChecklistInvite.fromJson)
+          .toList();
+    }
+    return <ChecklistInvite>[];
+  }
+
+  Future<List<ChecklistInvite>> getMyChecklistInvites({
+    int limit = 100,
+    int offset = 0,
+  }) async {
+    final uri = _uri('/api/checklist-invites').replace(queryParameters: {
+      'limit': limit.toString(),
+      'offset': offset.toString(),
+    });
+    final res = await _withTimeout(http.get(uri, headers: _headers()));
+    _throwIfError(res);
+    final json = _decode(res);
+    final list = json['invites'];
+    if (list is List) {
+      return list
+          .whereType<Map<String, dynamic>>()
+          .map(ChecklistInvite.fromJson)
+          .toList();
+    }
+    return <ChecklistInvite>[];
+  }
+
+  Future<void> acceptChecklistInvite(int inviteId) async {
+    final res = await _withTimeout(http.post(
+      _uri('/api/checklist-invites/$inviteId/accept'),
+      headers: _headers(),
+    ));
+    _throwIfError(res);
+  }
+
+  Future<void> rejectChecklistInvite(int inviteId) async {
+    final res = await _withTimeout(http.post(
+      _uri('/api/checklist-invites/$inviteId/reject'),
+      headers: _headers(),
+    ));
+    _throwIfError(res);
+  }
+
+  Future<void> revokeChecklistInvite(int inviteId) async {
+    final res = await _withTimeout(http.post(
+      _uri('/api/checklist-invites/$inviteId/revoke'),
+      headers: _headers(),
+    ));
+    _throwIfError(res);
+  }
+
+  Future<ChecklistShareInfo> getChecklistShares(int listId) async {
+    final res = await _withTimeout(
+      http.get(_uri('/api/checklists/$listId/shares'), headers: _headers()),
+    );
+    _throwIfError(res);
+    final json = _decode(res);
+    return ChecklistShareInfo.fromJson(json);
+  }
+
+  Future<void> updateChecklistShareRole({
+    required int listId,
+    required String username,
+    required bool canEdit,
+  }) async {
+    final payload = {'canEdit': canEdit};
+    final res = await _withTimeout(http.patch(
+      _uri('/api/checklists/$listId/shares/$username'),
+      headers: _headers(),
+      body: jsonEncode(payload),
+    ));
+    _throwIfError(res);
+  }
+
+  Future<void> removeChecklistShare({
+    required int listId,
+    required String username,
+  }) async {
+    final res = await _withTimeout(
+      http.delete(_uri('/api/checklists/$listId/shares/$username'), headers: _headers()),
+    );
+    _throwIfError(res);
+  }
+
+  Future<void> leaveChecklist(int listId) async {
+    final res = await _withTimeout(http.post(
+      _uri('/api/checklists/$listId/leave'),
+      headers: _headers(),
+    ));
+    _throwIfError(res);
+  }
+
+  Future<void> transferChecklistOwner({
+    required int listId,
+    required String userKey,
+  }) async {
+    final payload = {'userKey': userKey, 'user': userKey};
+    final res = await _withTimeout(http.post(
+      _uri('/api/checklists/$listId/transfer-owner'),
+      headers: _headers(),
+      body: jsonEncode(payload),
+    ));
+    _throwIfError(res);
+  }
+
+  // In-app notifications inbox
+  Future<List<InAppNotification>> getNotifications({
+    bool unreadOnly = false,
+    int limit = 100,
+    int offset = 0,
+  }) async {
+    final uri = _uri('/api/notifications').replace(queryParameters: {
+      'unreadOnly': unreadOnly.toString(),
+      'limit': limit.toString(),
+      'offset': offset.toString(),
+    });
+    final res = await _withTimeout(http.get(uri, headers: _headers()));
+    _throwIfError(res);
+    final json = _decode(res);
+    final list = json['notifications'];
+    if (list is List) {
+      return list
+          .whereType<Map<String, dynamic>>()
+          .map(InAppNotification.fromJson)
+          .toList();
+    }
+    return <InAppNotification>[];
+  }
+
+  Future<void> readNotification(int id) async {
+    final res = await _withTimeout(http.post(
+      _uri('/api/notifications/$id/read'),
+      headers: _headers(),
+    ));
+    _throwIfError(res);
+  }
+
+  Future<void> readAllNotifications() async {
+    final res = await _withTimeout(http.post(
+      _uri('/api/notifications/read-all'),
+      headers: _headers(),
+    ));
+    _throwIfError(res);
+  }
+
+  // Checklist logs
+  Future<List<ChecklistLogEntry>> getChecklistLogs({
+    required int listId,
+    String? actor,
+    String? type,
+    String? targetType,
+    String? targetId,
+    int? from,
+    int? to,
+    int limit = 200,
+    int offset = 0,
+  }) async {
+    final params = <String, String>{
+      'limit': limit.toString(),
+      'offset': offset.toString(),
+    };
+    if (actor != null && actor.trim().isNotEmpty) params['actor'] = actor.trim();
+    if (type != null && type.trim().isNotEmpty) params['type'] = type.trim();
+    if (targetType != null && targetType.trim().isNotEmpty) {
+      params['targetType'] = targetType.trim();
+    }
+    if (targetId != null && targetId.trim().isNotEmpty) {
+      params['targetId'] = targetId.trim();
+    }
+    if (from != null) params['from'] = from.toString();
+    if (to != null) params['to'] = to.toString();
+
+    final uri = _uri('/api/checklists/$listId/logs').replace(queryParameters: params);
+    final res = await _withTimeout(http.get(uri, headers: _headers()));
+    _throwIfError(res);
+    final json = _decode(res);
+    final list = json['logs'];
+    if (list is List) {
+      return list
+          .whereType<Map<String, dynamic>>()
+          .map(ChecklistLogEntry.fromJson)
+          .toList();
+    }
+    return <ChecklistLogEntry>[];
   }
 
   Future<List<TimeActivity>> getActivities({

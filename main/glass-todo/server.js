@@ -360,6 +360,14 @@ const getUserSettingsDefaults = () => ({
     calendarDefaultMode: 'day',
     autoMigrateEnabled: true,
     pushEnabled: false,
+    notifications: {
+        enabled: false,
+        leadMinutes: 0,
+        quietHoursEnabled: true,
+        quietHours: { start: '22:00', end: '08:00' },
+        dueReminder: true,
+        planStartReminder: true
+    },
     calendarSettings: { showTime: true, showTags: true, showLunar: true, showHoliday: true }
 });
 
@@ -368,6 +376,44 @@ const sanitizeUserSettings = (input = {}) => {
     const viewSettings = { ...defaults.viewSettings, ...(input.viewSettings || {}) };
     const calendarSettings = { ...defaults.calendarSettings, ...(input.calendarSettings || {}) };
     const mode = ['day', 'week', 'month'].includes(input.calendarDefaultMode) ? input.calendarDefaultMode : defaults.calendarDefaultMode;
+
+    const parseBoolStrict = (value, fallback) => {
+        if (typeof value === 'boolean') return value;
+        return fallback;
+    };
+
+    const safeString = (value, max = 200) => {
+        if (value === null || typeof value === 'undefined') return '';
+        return String(value).trim().slice(0, max);
+    };
+
+    const clampInt = (value, fallback, min, max) => {
+        const parsed = parseInt(value, 10);
+        if (!Number.isFinite(parsed)) return fallback;
+        return Math.min(max, Math.max(min, parsed));
+    };
+
+    const parseLead = (value) => {
+        const allowed = [0, 5, 10, 30];
+        const parsed = parseInt(value, 10);
+        if (!Number.isFinite(parsed)) return defaults.notifications.leadMinutes;
+        return allowed.includes(parsed) ? parsed : defaults.notifications.leadMinutes;
+    };
+
+    const parseTimeHHmm = (value, fallback) => {
+        const raw = safeString(value, 10);
+        if (!raw) return fallback;
+        if (!/^\d{2}:\d{2}$/.test(raw)) return fallback;
+        const [hh, mm] = raw.split(':').map(v => parseInt(v, 10));
+        if (!Number.isFinite(hh) || !Number.isFinite(mm)) return fallback;
+        if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return fallback;
+        return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+    };
+
+    const notifications = input.notifications && typeof input.notifications === 'object' ? input.notifications : {};
+    const quietHours = notifications.quietHours && typeof notifications.quietHours === 'object'
+        ? notifications.quietHours
+        : {};
     return {
         viewSettings: {
             calendar: !!viewSettings.calendar,
@@ -377,6 +423,17 @@ const sanitizeUserSettings = (input = {}) => {
         calendarDefaultMode: mode,
         autoMigrateEnabled: typeof input.autoMigrateEnabled === 'boolean' ? input.autoMigrateEnabled : defaults.autoMigrateEnabled,
         pushEnabled: typeof input.pushEnabled === 'boolean' ? input.pushEnabled : defaults.pushEnabled,
+        notifications: {
+            enabled: parseBoolStrict(notifications.enabled, defaults.notifications.enabled),
+            leadMinutes: parseLead(notifications.leadMinutes),
+            quietHoursEnabled: parseBoolStrict(notifications.quietHoursEnabled, defaults.notifications.quietHoursEnabled),
+            quietHours: {
+                start: parseTimeHHmm(quietHours.start, defaults.notifications.quietHours.start),
+                end: parseTimeHHmm(quietHours.end, defaults.notifications.quietHours.end)
+            },
+            dueReminder: parseBoolStrict(notifications.dueReminder, defaults.notifications.dueReminder),
+            planStartReminder: parseBoolStrict(notifications.planStartReminder, defaults.notifications.planStartReminder)
+        },
         calendarSettings: {
             showTime: !!calendarSettings.showTime,
             showTags: !!calendarSettings.showTags,

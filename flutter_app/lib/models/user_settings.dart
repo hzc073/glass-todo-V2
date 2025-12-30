@@ -46,6 +46,7 @@ class UserSettings {
       notifications: UserNotificationSettings(
         enabled: false,
         leadMinutes: 0,
+        quietHoursEnabled: true,
         quietStart: '22:00',
         quietEnd: '08:00',
         dueReminder: true,
@@ -329,6 +330,7 @@ class UserNotificationSettings {
   const UserNotificationSettings({
     required this.enabled,
     required this.leadMinutes,
+    required this.quietHoursEnabled,
     required this.quietStart,
     required this.quietEnd,
     required this.dueReminder,
@@ -337,6 +339,7 @@ class UserNotificationSettings {
 
   final bool enabled;
   final int leadMinutes;
+  final bool quietHoursEnabled;
   final String quietStart; // HH:mm
   final String quietEnd; // HH:mm
   final bool dueReminder;
@@ -350,6 +353,8 @@ class UserNotificationSettings {
     return UserNotificationSettings(
       enabled: _parseBool(json['enabled']) ?? defaults.enabled,
       leadMinutes: _parseInt(json['leadMinutes']) ?? defaults.leadMinutes,
+      quietHoursEnabled:
+          _parseBool(json['quietHoursEnabled']) ?? defaults.quietHoursEnabled,
       quietStart: (quietHours['start'] ?? defaults.quietStart).toString(),
       quietEnd: (quietHours['end'] ?? defaults.quietEnd).toString(),
       dueReminder: _parseBool(json['dueReminder']) ?? defaults.dueReminder,
@@ -361,6 +366,7 @@ class UserNotificationSettings {
   Map<String, dynamic> toJson() => {
         'enabled': enabled,
         'leadMinutes': leadMinutes,
+        'quietHoursEnabled': quietHoursEnabled,
         'quietHours': {'start': quietStart, 'end': quietEnd},
         'dueReminder': dueReminder,
         'planStartReminder': planStartReminder,
@@ -369,6 +375,7 @@ class UserNotificationSettings {
   UserNotificationSettings copyWith({
     bool? enabled,
     int? leadMinutes,
+    bool? quietHoursEnabled,
     String? quietStart,
     String? quietEnd,
     bool? dueReminder,
@@ -377,6 +384,7 @@ class UserNotificationSettings {
     return UserNotificationSettings(
       enabled: enabled ?? this.enabled,
       leadMinutes: leadMinutes ?? this.leadMinutes,
+      quietHoursEnabled: quietHoursEnabled ?? this.quietHoursEnabled,
       quietStart: quietStart ?? this.quietStart,
       quietEnd: quietEnd ?? this.quietEnd,
       dueReminder: dueReminder ?? this.dueReminder,

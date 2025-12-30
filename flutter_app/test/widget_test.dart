@@ -5,6 +5,7 @@ import 'package:glass_todo_flutter/main.dart';
 import 'package:glass_todo_flutter/core/app_config.dart';
 import 'package:glass_todo_flutter/core/app_settings.dart';
 import 'package:glass_todo_flutter/core/auth_store.dart';
+import 'package:glass_todo_flutter/core/login_attempt_limiter.dart';
 
 void main() {
   testWidgets('Launches login page when logged out', (WidgetTester tester) async {
@@ -18,9 +19,15 @@ void main() {
     );
     final authStore = await AuthStore.load();
     final settings = await AppSettings.load();
+    final loginAttemptLimiter = await LoginAttemptLimiter.load();
 
     await tester.pumpWidget(
-      GlassTodoApp(config: config, authStore: authStore, settings: settings),
+      GlassTodoApp(
+        config: config,
+        authStore: authStore,
+        settings: settings,
+        loginAttemptLimiter: loginAttemptLimiter,
+      ),
     );
     await tester.pumpAndSettle();
 

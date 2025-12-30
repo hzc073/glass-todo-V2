@@ -35,6 +35,7 @@ Future<void> showAppSettingsDialog(
   required ValueChanged<ThemeMode> onThemeModeChanged,
   Future<void> Function()? onOpenBackendSettings,
   Future<void> Function()? onExportData,
+  Future<void> Function()? onExportExcel,
   Future<void> Function()? onImportData,
   Future<void> Function(int retentionDays)? onClearCompleted,
   Future<void> Function()? onDeleteAccount,
@@ -55,6 +56,7 @@ Future<void> showAppSettingsDialog(
       onThemeModeChanged: onThemeModeChanged,
       onOpenBackendSettings: onOpenBackendSettings,
       onExportData: onExportData,
+      onExportExcel: onExportExcel,
       onImportData: onImportData,
       onClearCompleted: onClearCompleted,
       onDeleteAccount: onDeleteAccount,
@@ -74,6 +76,7 @@ class _AppSettingsDialog extends StatefulWidget {
     required this.onThemeModeChanged,
     required this.onOpenBackendSettings,
     required this.onExportData,
+    required this.onExportExcel,
     required this.onImportData,
     required this.onClearCompleted,
     required this.onDeleteAccount,
@@ -90,6 +93,7 @@ class _AppSettingsDialog extends StatefulWidget {
   final ValueChanged<ThemeMode> onThemeModeChanged;
   final Future<void> Function()? onOpenBackendSettings;
   final Future<void> Function()? onExportData;
+  final Future<void> Function()? onExportExcel;
   final Future<void> Function()? onImportData;
   final Future<void> Function(int retentionDays)? onClearCompleted;
   final Future<void> Function()? onDeleteAccount;
@@ -956,6 +960,18 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
               ?.copyWith(fontWeight: FontWeight.w800),
         ),
         const SizedBox(height: 8),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          value: n.quietHoursEnabled,
+          onChanged: n.enabled
+              ? (v) => _updateSettings(
+                    _settings.copyWith(
+                      notifications: n.copyWith(quietHoursEnabled: v),
+                    ),
+                  )
+              : null,
+          title: const Text('启用勿扰时段'),
+        ),
         Row(
           children: [
             Expanded(
@@ -1193,6 +1209,14 @@ class _AppSettingsDialogState extends State<_AppSettingsDialog> {
               ),
             ),
           ],
+        ),
+        const SizedBox(height: 12),
+        OutlinedButton.icon(
+          onPressed: widget.onExportExcel == null
+              ? null
+              : () => widget.onExportExcel!.call(),
+          icon: const Icon(Icons.table_view),
+          label: const Text('导出 Excel'),
         ),
         if (_showDevOptions) ...[
           const SizedBox(height: 18),

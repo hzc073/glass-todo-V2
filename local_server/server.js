@@ -40,6 +40,7 @@ const ATTACHMENTS_ALLOWED_EXTS = new Set([
 ]);
 const PUSH_SCAN_INTERVAL_MS = 60 * 1000;
 const PUSH_WINDOW_MS = 60 * 1000;
+const PUSH_REMINDER_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const streamPipeline = promisify(pipeline);
 const isS3Driver = ATTACHMENTS_DRIVER === 's3' || ATTACHMENTS_DRIVER === 'r2';
 const s3Client = isS3Driver ? new S3Client({
@@ -640,7 +641,57 @@ const scanAndSendReminders = async () => {
     if (!pushReady && !fcmReady) return;
 
     const now = Date.now();
+    const windowStart = now - PUSH_REMINDER_LOOKBACK_MS;
     const windowEnd = now + PUSH_WINDOW_MS;
+
+    const userSettingsCache = new Map();
+
+    const parseTimeToMinutes = (value) => {
+        const raw = String(value || '').trim();
+        if (!raw) return null;
+        const parts = raw.split(':');
+        if (parts.length !== 2) return null;
+        const hh = parseInt(parts[0], 10);
+        const mm = parseInt(parts[1], 10);
+        if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+        if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+        return hh * 60 + mm;
+    };
+
+    const loadUserSettings = async (username) => {
+        if (userSettingsCache.has(username)) return userSettingsCache.get(username);
+        let parsed = null;
+        try {
+            const rows = await dbAll("SELECT settings_json FROM user_settings WHERE username = ?", [username]);
+            if (rows.length && rows[0].settings_json) parsed = JSON.parse(rows[0].settings_json);
+        } catch (e) {
+            parsed = null;
+        }
+        const sanitized = sanitizeUserSettings(parsed || {});
+        userSettingsCache.set(username, sanitized);
+        return sanitized;
+    };
+
+    const isQuietHoursActiveNow = (settings) => {
+        const notifications = settings?.notifications;
+        if (!notifications?.enabled) return true;
+        if (!notifications?.quietHoursEnabled) return false;
+
+        const quiet = notifications?.quietHours || {};
+        const startMinutes = parseTimeToMinutes(quiet.start);
+        const endMinutes = parseTimeToMinutes(quiet.end);
+        if (startMinutes == null || endMinutes == null) return false;
+        if (startMinutes === endMinutes) return false;
+
+        const offsetMinutes = Number(settings?.preferences?.timeZoneOffsetMinutes || 0);
+        const localNow = new Date(now + offsetMinutes * 60 * 1000);
+        const minutes = localNow.getUTCHours() * 60 + localNow.getUTCMinutes();
+
+        if (startMinutes < endMinutes) {
+            return minutes >= startMinutes && minutes < endMinutes;
+        }
+        return minutes >= startMinutes || minutes < endMinutes;
+    };
 
     let tasks = [];
     try {
@@ -652,7 +703,7 @@ const scanAndSendReminders = async () => {
                AND remind_at IS NOT NULL
                AND remind_at >= ? AND remind_at < ?
                AND (notified_at IS NULL OR notified_at < remind_at)`,
-            ['completed', now, windowEnd]
+            ['completed', windowStart, windowEnd]
         );
     } catch (e) {
         console.warn('reminder scan failed', e);
@@ -660,6 +711,9 @@ const scanAndSendReminders = async () => {
     }
 
     for (const task of tasks) {
+        const settings = await loadUserSettings(task.username);
+        if (isQuietHoursActiveNow(settings)) continue;
+
         const date = String(task.due_date || '').trim();
         const start = String(task.start_time || '').trim();
         const when = date ? `${date}${start ? ` ${start}` : ''}` : '';
@@ -748,6 +802,7 @@ const getUserSettingsDefaults = () => ({
     notifications: {
         enabled: false,
         leadMinutes: 0,
+        quietHoursEnabled: true,
         quietHours: { start: '22:00', end: '08:00' },
         dueReminder: true,
         planStartReminder: true
@@ -911,6 +966,7 @@ const sanitizeUserSettings = (input = {}) => {
         notifications: {
             enabled: notificationsEnabled,
             leadMinutes: parseLead(notifications.leadMinutes),
+            quietHoursEnabled: parseBoolStrict(notifications.quietHoursEnabled, defaults.notifications.quietHoursEnabled),
             quietHours: {
                 start: parseTimeHHmm(notifications?.quietHours?.start, defaults.notifications.quietHours.start),
                 end: parseTimeHHmm(notifications?.quietHours?.end, defaults.notifications.quietHours.end)

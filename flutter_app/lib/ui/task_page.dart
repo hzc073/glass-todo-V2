@@ -185,7 +185,10 @@ class _TaskPageState extends State<TaskPage> {
     }
     final granted = await LocalTaskNotifications.instance.requestPermission();
     if (!granted) return;
-    await LocalTaskNotifications.instance.syncTaskReminders(_tasks);
+    await LocalTaskNotifications.instance.syncTaskReminders(
+      _tasks,
+      settings: widget.userSettings.notifications,
+    );
   }
 
   Future<void> _syncTimeTrackingOngoingNotification() async {
@@ -288,8 +291,7 @@ class _TaskPageState extends State<TaskPage> {
       return '$fallback：请求超时（后端：${_apiBaseUrlLabel()}）';
     }
     if (_looksLikeNetworkError(error)) {
-      final hint = _useAndroidUi ? '（Android 模拟器用 10.0.2.2:3000）' : '';
-      return '$fallback：无法连接后端（${_apiBaseUrlLabel()}）$hint';
+      return '$fallback：无法连接后端（${_apiBaseUrlLabel()}），请检查网络或在设置中修改后端地址。';
     }
     return fallback;
   }
@@ -1948,7 +1950,7 @@ class _TaskPageState extends State<TaskPage> {
 
   void _closeAndroidQuickAdd() {
     if (!_androidQuickAddOpen) return;
-    FocusScope.of(context).unfocus();
+    FocusManager.instance.primaryFocus?.unfocus();
     setState(() => _androidQuickAddOpen = false);
   }
 
@@ -2353,7 +2355,7 @@ class _TaskPageState extends State<TaskPage> {
     if (title.isEmpty || _saving) return false;
 
     _quickAddController.clear();
-    FocusScope.of(context).unfocus();
+    FocusManager.instance.primaryFocus?.unfocus();
     final subtasks = _buildSubtasksFromDrafts();
     final startTimeValue = _quickAddStartTime;
     final endTimeValue = _quickAddEndTime;
@@ -3438,17 +3440,18 @@ class _TaskPageState extends State<TaskPage> {
 
   Future<void> _promptCreateChecklist() async {
     if (_saving) return;
-    final controller = TextEditingController();
+    var draft = '';
     final name = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('新建清单'),
         content: TextField(
-          controller: controller,
           autofocus: true,
           decoration: const InputDecoration(
             hintText: '清单名称',
           ),
+          onChanged: (value) => draft = value,
+          onSubmitted: (value) => Navigator.of(context).pop(value),
         ),
         actions: [
           TextButton(
@@ -3456,13 +3459,12 @@ class _TaskPageState extends State<TaskPage> {
             child: const Text('取消'),
           ),
           ElevatedButton(
-            onPressed: () => Navigator.of(context).pop(controller.text),
+            onPressed: () => Navigator.of(context).pop(draft),
             child: const Text('创建'),
           ),
         ],
       ),
     );
-    controller.dispose();
     if (!mounted) return;
     final trimmed = name?.trim() ?? '';
     if (trimmed.isEmpty) return;
@@ -3539,7 +3541,7 @@ class _TaskPageState extends State<TaskPage> {
     if (title.isEmpty || listId == null || _saving) return;
 
     _checklistAddController.clear();
-    FocusScope.of(context).unfocus();
+    FocusManager.instance.primaryFocus?.unfocus();
     setState(() => _saving = true);
     try {
       final created = await widget.apiClient
@@ -6847,17 +6849,18 @@ class _TaskDetailPanel extends StatelessWidget {
     }
 
     Future<void> addSubtask() async {
-      final controller = TextEditingController();
+      var draft = '';
       final title = await showDialog<String>(
         context: context,
         builder: (context) => AlertDialog(
           title: const Text('添加子任务'),
           content: TextField(
-            controller: controller,
             autofocus: true,
             decoration: const InputDecoration(
               hintText: '子任务内容',
             ),
+            onChanged: (value) => draft = value,
+            onSubmitted: (value) => Navigator.of(context).pop(value),
           ),
           actions: [
             TextButton(
@@ -6865,13 +6868,12 @@ class _TaskDetailPanel extends StatelessWidget {
               child: const Text('取消'),
             ),
             ElevatedButton(
-              onPressed: () => Navigator.of(context).pop(controller.text),
+              onPressed: () => Navigator.of(context).pop(draft),
               child: const Text('添加'),
             ),
           ],
         ),
       );
-      controller.dispose();
       final trimmed = title?.trim() ?? '';
       if (trimmed.isEmpty) return;
       final next = [

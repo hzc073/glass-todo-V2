@@ -2,6 +2,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/timezone.dart' as tz;
 
 import '../../models/task.dart';
+import '../../models/user_settings.dart';
 import 'local_notifications.dart';
 
 class LocalTaskNotifications {
@@ -56,7 +57,10 @@ class LocalTaskNotifications {
     }
   }
 
-  Future<void> syncTaskReminders(List<Task> tasks) async {
+  Future<void> syncTaskReminders(
+    List<Task> tasks, {
+    required UserNotificationSettings settings,
+  }) async {
     final ready = await ensureInitialized();
     if (!ready) return;
 
@@ -71,6 +75,9 @@ class LocalTaskNotifications {
 
       final when = DateTime.fromMillisecondsSinceEpoch(remindAt);
       if (!when.isAfter(now.add(const Duration(seconds: 1)))) continue;
+
+      final scheduledAt = _applyQuietHoursIfNeeded(when, settings: settings);
+      if (!scheduledAt.isAfter(now.add(const Duration(seconds: 1)))) continue;
 
       final id = _taskNotificationId(task.id);
       final body = task.title.trim().isEmpty ? '任务提醒' : task.title.trim();
@@ -91,12 +98,50 @@ class LocalTaskNotifications {
         id,
         '开始时间提醒',
         body,
-        tz.TZDateTime.from(when, tz.local),
+        tz.TZDateTime.from(scheduledAt, tz.local),
         details,
         payload: '$taskReminderPayloadPrefix${task.id}',
         androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
       );
     }
+  }
+
+  static DateTime _applyQuietHoursIfNeeded(
+    DateTime when, {
+    required UserNotificationSettings settings,
+  }) {
+    if (!settings.quietHoursEnabled) return when;
+
+    final startMinutes = _minutesFromHHmm(settings.quietStart);
+    final endMinutes = _minutesFromHHmm(settings.quietEnd);
+    if (startMinutes == null || endMinutes == null) return when;
+    if (startMinutes == endMinutes) return when;
+
+    final whenMinutes = when.hour * 60 + when.minute;
+    final crossesMidnight = startMinutes > endMinutes;
+    final within = crossesMidnight
+        ? (whenMinutes >= startMinutes || whenMinutes < endMinutes)
+        : (whenMinutes >= startMinutes && whenMinutes < endMinutes);
+    if (!within) return when;
+
+    final endHour = endMinutes ~/ 60;
+    final endMinute = endMinutes % 60;
+    final endBase =
+        DateTime(when.year, when.month, when.day, endHour, endMinute);
+
+    if (!crossesMidnight) return endBase;
+    if (whenMinutes < endMinutes) return endBase;
+    return endBase.add(const Duration(days: 1));
+  }
+
+  static int? _minutesFromHHmm(String raw) {
+    final parts = raw.trim().split(':');
+    if (parts.length != 2) return null;
+    final hh = int.tryParse(parts[0]);
+    final mm = int.tryParse(parts[1]);
+    if (hh == null || mm == null) return null;
+    if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+    return hh * 60 + mm;
   }
 
   int _taskNotificationId(String rawId) {

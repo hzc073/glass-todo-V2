@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
+import 'package:excel/excel.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
@@ -12,6 +14,7 @@ import 'core/api_client.dart';
 import 'core/app_config.dart';
 import 'core/app_settings.dart';
 import 'core/auth_store.dart';
+import 'core/login_attempt_limiter.dart';
 import 'core/notifications/fcm_message_notifications.dart';
 import 'core/notifications/fcm_notification_controller.dart';
 import 'core/notifications/local_notifications.dart';
@@ -34,8 +37,15 @@ Future<void> main() async {
   final config = await AppConfig.load();
   final authStore = await AuthStore.load();
   final settings = await AppSettings.load();
+  final loginAttemptLimiter = await LoginAttemptLimiter.load();
   runApp(
-      GlassTodoApp(config: config, authStore: authStore, settings: settings));
+    GlassTodoApp(
+      config: config,
+      authStore: authStore,
+      settings: settings,
+      loginAttemptLimiter: loginAttemptLimiter,
+    ),
+  );
 }
 
 class GlassTodoApp extends StatefulWidget {
@@ -44,11 +54,13 @@ class GlassTodoApp extends StatefulWidget {
     required this.config,
     required this.authStore,
     required this.settings,
+    required this.loginAttemptLimiter,
   });
 
   final AppConfig config;
   final AuthStore authStore;
   final AppSettings settings;
+  final LoginAttemptLimiter loginAttemptLimiter;
 
   @override
   State<GlassTodoApp> createState() => _GlassTodoAppState();
@@ -115,6 +127,7 @@ class _GlassTodoAppState extends State<GlassTodoApp> {
             )
           : LoginPage(
               appTitle: widget.config.appTitle,
+              loginAttemptLimiter: widget.loginAttemptLimiter,
               onLogin: _handleLogin,
               onOpenSettings: _openBackendSettings,
             ),
@@ -323,6 +336,7 @@ class _GlassTodoAppState extends State<GlassTodoApp> {
       },
       onOpenBackendSettings: _openBackendSettings,
       onExportData: () => _exportData(navContext),
+      onExportExcel: () => _exportExcelData(navContext),
       onImportData: () => _importData(navContext),
       onClearCompleted: (days) => _clearCompletedTasks(navContext, days),
       onDeleteAccount: () => _deleteAccount(navContext),
@@ -351,6 +365,361 @@ class _GlassTodoAppState extends State<GlassTodoApp> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
             content: Text(downloaded ? '已导出 JSON，并复制到剪贴板。' : '已复制 JSON 到剪贴板。')),
+      );
+    } on UnauthorizedException {
+      await _handleLogout();
+    } catch (_) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('导出失败。')));
+    }
+  }
+
+  CellValue? _excelCellValue(dynamic value) {
+    if (value == null) return null;
+    if (value is bool) return BoolCellValue(value);
+    if (value is int) return IntCellValue(value);
+    if (value is num) return DoubleCellValue(value.toDouble());
+    if (value is String) return TextCellValue(value);
+    try {
+      return TextCellValue(jsonEncode(value));
+    } catch (_) {
+      return TextCellValue(value.toString());
+    }
+  }
+
+  void _appendExcelTable({
+    required Excel excel,
+    required String sheetName,
+    required List<Map<String, dynamic>> rows,
+    List<String>? preferredColumns,
+  }) {
+    final sheet = excel[sheetName];
+
+    final ordered = <String>[];
+    final remaining = <String>{};
+    for (final row in rows) {
+      remaining.addAll(row.keys.map((k) => k.toString()));
+    }
+
+    if (preferredColumns != null) {
+      for (final col in preferredColumns) {
+        if (remaining.remove(col)) ordered.add(col);
+      }
+    }
+
+    final rest = remaining.toList()..sort();
+    ordered.addAll(rest);
+
+    sheet.appendRow(ordered.map((col) => TextCellValue(col)).toList());
+    for (final row in rows) {
+      sheet.appendRow(
+        ordered.map((col) => _excelCellValue(row[col])).toList(),
+      );
+    }
+  }
+
+  List<Map<String, dynamic>> _flattenToRows(Map<String, dynamic> map) {
+    final rows = <Map<String, dynamic>>[];
+
+    void walk(String prefix, dynamic node) {
+      if (node is Map) {
+        final typed = node.cast<String, dynamic>();
+        for (final entry in typed.entries) {
+          final next = prefix.isEmpty ? entry.key : '$prefix.${entry.key}';
+          walk(next, entry.value);
+        }
+        return;
+      }
+
+      if (node is List) {
+        rows.add({
+          'path': prefix,
+          'value': jsonEncode(node),
+        });
+        return;
+      }
+
+      rows.add({
+        'path': prefix,
+        'value': node,
+      });
+    }
+
+    walk('', map);
+    return rows;
+  }
+
+  Future<void> _exportExcelData(BuildContext context) async {
+    try {
+      final payload = await _apiClient.exportAllData();
+      final now = DateTime.now();
+      final stamp = [
+        now.year.toString().padLeft(4, '0'),
+        now.month.toString().padLeft(2, '0'),
+        now.day.toString().padLeft(2, '0'),
+        '-',
+        now.hour.toString().padLeft(2, '0'),
+        now.minute.toString().padLeft(2, '0'),
+        now.second.toString().padLeft(2, '0'),
+      ].join();
+      final filename = 'glass-todo-export-$stamp.xlsx';
+
+      final excel = Excel.createExcel();
+      final defaultSheet = excel.getDefaultSheet();
+      if (defaultSheet != null) {
+        excel.rename(defaultSheet, 'meta');
+      }
+
+      final meta = excel['meta'];
+      meta.appendRow([TextCellValue('key'), TextCellValue('value')]);
+      meta.appendRow([TextCellValue('exportedAt'), _excelCellValue(payload['exportedAt'])]);
+
+      final data = payload['data'];
+      if (data is Map) {
+        final typed = data.cast<String, dynamic>();
+
+        final settingsRaw = typed['settings'];
+        if (settingsRaw is Map) {
+          _appendExcelTable(
+            excel: excel,
+            sheetName: 'settings',
+            rows: _flattenToRows(settingsRaw.cast<String, dynamic>()),
+            preferredColumns: const ['path', 'value'],
+          );
+        }
+
+        final tasksRaw = typed['tasks'];
+        if (tasksRaw is List) {
+          _appendExcelTable(
+            excel: excel,
+            sheetName: 'tasks',
+            rows: tasksRaw.whereType<Map>().map((e) => e.cast<String, dynamic>()).toList(),
+            preferredColumns: const [
+              'id',
+              'title',
+              'notes',
+              'status',
+              'dueDate',
+              'startTime',
+              'endDate',
+              'endTime',
+              'tags',
+              'inbox',
+              'priority',
+              'remindAt',
+              'repeatRule',
+              'createdAt',
+              'updatedAt',
+              'deletedAt',
+            ],
+          );
+        }
+
+        final checklistsRaw = typed['checklists'];
+        if (checklistsRaw is Map) {
+          final checklists = checklistsRaw.cast<String, dynamic>();
+          final listsRaw = checklists['lists'];
+          if (listsRaw is List) {
+            _appendExcelTable(
+              excel: excel,
+              sheetName: 'checklists_lists',
+              rows:
+                  listsRaw.whereType<Map>().map((e) => e.cast<String, dynamic>()).toList(),
+              preferredColumns: const [
+                'id',
+                'name',
+                'owner',
+                'sharedCount',
+                'createdAt',
+                'updatedAt',
+              ],
+            );
+          }
+
+          final columnsRaw = checklists['columns'];
+          if (columnsRaw is List) {
+            _appendExcelTable(
+              excel: excel,
+              sheetName: 'checklists_columns',
+              rows: columnsRaw
+                  .whereType<Map>()
+                  .map((e) => e.cast<String, dynamic>())
+                  .toList(),
+              preferredColumns: const [
+                'id',
+                'listId',
+                'name',
+                'sortOrder',
+                'createdAt',
+                'updatedAt',
+              ],
+            );
+          }
+
+          final itemsRaw = checklists['items'];
+          if (itemsRaw is List) {
+            _appendExcelTable(
+              excel: excel,
+              sheetName: 'checklists_items',
+              rows:
+                  itemsRaw.whereType<Map>().map((e) => e.cast<String, dynamic>()).toList(),
+              preferredColumns: const [
+                'id',
+                'listId',
+                'columnId',
+                'title',
+                'completed',
+                'completedBy',
+                'notes',
+                'createdAt',
+                'updatedAt',
+              ],
+            );
+          }
+
+          final sharesRaw = checklists['shares'];
+          if (sharesRaw is List) {
+            _appendExcelTable(
+              excel: excel,
+              sheetName: 'checklists_shares',
+              rows: sharesRaw
+                  .whereType<Map>()
+                  .map((e) => e.cast<String, dynamic>())
+                  .toList(),
+              preferredColumns: const [
+                'listId',
+                'sharedUser',
+                'canEdit',
+                'createdAt',
+              ],
+            );
+          }
+        }
+
+        final timeTrackingRaw = typed['timeTracking'];
+        if (timeTrackingRaw is Map) {
+          final tracking = timeTrackingRaw.cast<String, dynamic>();
+          final activitiesRaw = tracking['activities'];
+          if (activitiesRaw is List) {
+            _appendExcelTable(
+              excel: excel,
+              sheetName: 'time_activities',
+              rows: activitiesRaw
+                  .whereType<Map>()
+                  .map((e) => e.cast<String, dynamic>())
+                  .toList(),
+              preferredColumns: const [
+                'id',
+                'name',
+                'taskId',
+                'icon',
+                'color',
+                'category',
+                'goal',
+                'note',
+                'createdAt',
+                'updatedAt',
+                'deletedAt',
+              ],
+            );
+          }
+
+          final entriesRaw = tracking['entries'];
+          if (entriesRaw is List) {
+            _appendExcelTable(
+              excel: excel,
+              sheetName: 'time_entries',
+              rows: entriesRaw
+                  .whereType<Map>()
+                  .map((e) => e.cast<String, dynamic>())
+                  .toList(),
+              preferredColumns: const [
+                'id',
+                'activityId',
+                'taskId',
+                'startedAt',
+                'endedAt',
+                'durationMs',
+                'note',
+                'tags',
+                'createdAt',
+                'updatedAt',
+                'deletedAt',
+              ],
+            );
+          }
+
+          final goalsRaw = tracking['goals'];
+          if (goalsRaw is List) {
+            _appendExcelTable(
+              excel: excel,
+              sheetName: 'time_goals',
+              rows: goalsRaw.whereType<Map>().map((e) => e.cast<String, dynamic>()).toList(),
+            );
+          }
+        }
+
+        final pomodoroRaw = typed['pomodoro'];
+        if (pomodoroRaw is Map) {
+          final pomodoro = pomodoroRaw.cast<String, dynamic>();
+          final pomodoroSettingsRaw = pomodoro['settings'];
+          if (pomodoroSettingsRaw is Map) {
+            _appendExcelTable(
+              excel: excel,
+              sheetName: 'pomodoro_settings',
+              rows: _flattenToRows(pomodoroSettingsRaw.cast<String, dynamic>()),
+              preferredColumns: const ['path', 'value'],
+            );
+          }
+          final pomodoroStateRaw = pomodoro['state'];
+          if (pomodoroStateRaw is Map) {
+            _appendExcelTable(
+              excel: excel,
+              sheetName: 'pomodoro_state',
+              rows: _flattenToRows(pomodoroStateRaw.cast<String, dynamic>()),
+              preferredColumns: const ['path', 'value'],
+            );
+          }
+          final sessionsRaw = pomodoro['sessions'];
+          if (sessionsRaw is List) {
+            _appendExcelTable(
+              excel: excel,
+              sheetName: 'pomodoro_sessions',
+              rows: sessionsRaw
+                  .whereType<Map>()
+                  .map((e) => e.cast<String, dynamic>())
+                  .toList(),
+            );
+          }
+          final dailyStatsRaw = pomodoro['dailyStats'];
+          if (dailyStatsRaw is List) {
+            _appendExcelTable(
+              excel: excel,
+              sheetName: 'pomodoro_daily',
+              rows: dailyStatsRaw
+                  .whereType<Map>()
+                  .map((e) => e.cast<String, dynamic>())
+                  .toList(),
+            );
+          }
+        }
+      }
+
+      final bytes = excel.encode();
+      if (bytes == null || bytes.isEmpty) {
+        throw Exception('Failed to encode excel');
+      }
+
+      final downloaded = await downloadBytesFile(
+        filename: filename,
+        bytes: Uint8List.fromList(bytes),
+        mimeType:
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(downloaded ? '已导出 Excel。' : '已生成 Excel。')),
       );
     } on UnauthorizedException {
       await _handleLogout();

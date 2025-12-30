@@ -1,0 +1,35 @@
+services:
+  glass-todo-backend:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: glass-todo-backend:${IMAGE_TAG:-local}
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      DB_PATH: /app/data/database.sqlite
+      ATTACHMENTS_DIR: /app/data/attachments
+    ports:
+      - "${HOST_PORT:-3000}:3000"
+    volumes:
+      - ../data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:3000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

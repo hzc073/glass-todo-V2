@@ -29,8 +29,11 @@ class AppConfig {
 
   factory AppConfig.fromJson(Map<String, dynamic> json) {
     final rawApiBaseUrl = (json['apiBaseUrl'] ?? '').toString().trim();
+    final apiBaseUrl = rawApiBaseUrl.isEmpty
+        ? (kIsWeb ? '' : defaultApiBaseUrl)
+        : rawApiBaseUrl;
     return AppConfig(
-      apiBaseUrl: rawApiBaseUrl.isEmpty ? defaultApiBaseUrl : rawApiBaseUrl,
+      apiBaseUrl: apiBaseUrl,
       useLocalStorage: json['useLocalStorage'] == true,
       holidayJsonUrl: (json['holidayJsonUrl'] ?? '').toString().trim(),
       appTitle: (json['appTitle'] ?? 'Glass-ToDo').toString(),

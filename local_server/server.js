@@ -500,8 +500,47 @@ const ensureVapidKeys = async () => {
     }
 };
 
-app.use(cors());
+const parseCorsOrigins = (raw) => {
+    const value = String(raw || '').trim();
+    if (!value || value === '*') return null;
+    const list = value.split(',').map((item) => item.trim()).filter(Boolean);
+    return list.length ? list : null;
+};
+
+const corsOrigins = parseCorsOrigins(process.env.CORS_ORIGINS || process.env.CORS_ORIGIN);
+if (!corsOrigins) {
+    app.use(cors());
+} else {
+    const allowed = new Set(corsOrigins);
+    app.use(cors({
+        origin: (origin, callback) => {
+            if (!origin) return callback(null, true);
+            if (allowed.has(origin)) return callback(null, true);
+            return callback(new Error('Not allowed by CORS'));
+        }
+    }));
+}
+
+const dbGet = (sql, params = []) => new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)));
+});
+
 app.use(bodyParser.json());
+app.get('/health', async (req, res) => {
+    try {
+        await dbGet('SELECT 1 AS ok');
+        res.json({
+            ok: true,
+            uptimeSec: Math.round(process.uptime()),
+            now: Date.now()
+        });
+    } catch (e) {
+        res.status(500).json({
+            ok: false,
+            error: e && e.message ? e.message : String(e)
+        });
+    }
+});
 app.get('/config.json', (req, res) => {
     res.json({
         apiBaseUrl: process.env.API_BASE_URL || '',

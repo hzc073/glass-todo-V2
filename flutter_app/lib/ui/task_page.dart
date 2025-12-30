@@ -570,61 +570,46 @@ class _TaskPageState extends State<TaskPage> {
     final prefs = widget.userSettings.preferences;
     if (!prefs.shortcutsEnabled) return child;
 
-    final shortcuts = <ShortcutActivator, Intent>{};
-
-    void addShortcut(String raw, Intent intent) {
-      final activator = parseShortcutActivator(raw);
-      if (activator == null) return;
-      shortcuts.putIfAbsent(activator, () => intent);
-    }
-
     final newTaskActivator = parseShortcutActivator(prefs.shortcutNewTask);
     final searchActivator = parseShortcutActivator(prefs.shortcutSearch);
+    if (newTaskActivator == null && searchActivator == null) return child;
 
-    if (newTaskActivator != null) {
-      addShortcut(
-        prefs.shortcutNewTask,
-        _NewTaskIntent(
-            allowWhenEditing: newTaskActivator.control ||
-                newTaskActivator.alt ||
-                newTaskActivator.meta),
-      );
-    }
-    if (searchActivator != null) {
-      addShortcut(
-        prefs.shortcutSearch,
-        _SearchTasksIntent(
-            allowWhenEditing: searchActivator.control ||
-                searchActivator.alt ||
-                searchActivator.meta),
-      );
+    bool allowWhenEditing(SingleActivator activator) =>
+        activator.control || activator.alt || activator.meta;
+
+    bool matchesActivator(SingleActivator activator, KeyDownEvent event) {
+      if (event.logicalKey != activator.trigger) return false;
+      final keyboard = HardwareKeyboard.instance;
+      if (keyboard.isControlPressed != activator.control) return false;
+      if (keyboard.isAltPressed != activator.alt) return false;
+      if (keyboard.isShiftPressed != activator.shift) return false;
+      if (keyboard.isMetaPressed != activator.meta) return false;
+      return true;
     }
 
-    if (shortcuts.isEmpty) return child;
+    return Focus(
+      autofocus: true,
+      onKeyEvent: (node, event) {
+        if (event is! KeyDownEvent) return KeyEventResult.ignored;
 
-    return Shortcuts(
-      shortcuts: shortcuts,
-      child: Actions(
-        actions: <Type, Action<Intent>>{
-          _NewTaskIntent: CallbackAction<_NewTaskIntent>(
-            onInvoke: (intent) {
-              _handleNewTaskShortcut(allowWhenEditing: intent.allowWhenEditing);
-              return null;
-            },
-          ),
-          _SearchTasksIntent: CallbackAction<_SearchTasksIntent>(
-            onInvoke: (intent) {
-              _handleSearchShortcut(
-                  allowWhenEditing: intent.allowWhenEditing);
-              return null;
-            },
-          ),
-        },
-        child: Focus(
-          autofocus: true,
-          child: child,
-        ),
-      ),
+        if (newTaskActivator != null &&
+            matchesActivator(newTaskActivator, event)) {
+          final allow = allowWhenEditing(newTaskActivator);
+          if (!_allowShortcutInTextFields(allow)) return KeyEventResult.ignored;
+          _handleNewTaskShortcut(allowWhenEditing: allow);
+          return KeyEventResult.handled;
+        }
+
+        if (searchActivator != null && matchesActivator(searchActivator, event)) {
+          final allow = allowWhenEditing(searchActivator);
+          if (!_allowShortcutInTextFields(allow)) return KeyEventResult.ignored;
+          _handleSearchShortcut(allowWhenEditing: allow);
+          return KeyEventResult.handled;
+        }
+
+        return KeyEventResult.ignored;
+      },
+      child: child,
     );
   }
 
@@ -7680,16 +7665,4 @@ class _UndoAction {
 
   final String message;
   final Future<void> Function() onUndo;
-}
-
-class _NewTaskIntent extends Intent {
-  const _NewTaskIntent({required this.allowWhenEditing});
-
-  final bool allowWhenEditing;
-}
-
-class _SearchTasksIntent extends Intent {
-  const _SearchTasksIntent({required this.allowWhenEditing});
-
-  final bool allowWhenEditing;
 }

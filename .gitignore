@@ -73,6 +73,8 @@ node_modules/
 # ------------------------------------------------------------------------------
 # Local server runtime data
 # ------------------------------------------------------------------------------
+local_server/data/
+local_server/backups/
 local_server/storage/
 local_server/database.sqlite
 local_server/*.sqlite
@@ -86,6 +88,26 @@ local_server/server.out.log
 local_server/server.err.log
 
 # ------------------------------------------------------------------------------
+# Flutter web publish output (generated)
+# ------------------------------------------------------------------------------
+local_server/public/.last_build_id
+local_server/public/assets/
+local_server/public/canvaskit/
+local_server/public/favicon.ico
+local_server/public/firebase-messaging-sw.js
+local_server/public/flutter.js
+local_server/public/flutter_bootstrap.js
+local_server/public/flutter_service_worker.js
+local_server/public/index.html
+local_server/public/main.dart.js
+local_server/public/manifest.json
+local_server/public/version.json
+local_server/public/icons/
+
+# Cached runtime data (generated)
+local_server/public/holidays/
+
+# ------------------------------------------------------------------------------
 # Env files (keep examples)
 # ------------------------------------------------------------------------------
 .env
@@ -96,3 +118,8 @@ local_server/server.err.log
 # Main workspace (excluded from git)
 # ------------------------------------------------------------------------------
 main/
+
+# ------------------------------------------------------------------------------
+# Release artifacts (excluded from git)
+# ------------------------------------------------------------------------------
+release/

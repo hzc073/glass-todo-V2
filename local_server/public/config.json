@@ -1,6 +1,0 @@
-{
-  "apiBaseUrl": "http://localhost:3000",
-  "useLocalStorage": false,
-  "holidayJsonUrl": "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json",
-  "appTitle": "Glass Todo"
-}

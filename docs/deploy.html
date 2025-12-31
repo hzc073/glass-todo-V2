@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Glass Todo 部署：Docker Compose、反代、Cloudflare Tunnel。" />
+    <title>Glass Todo · 部署</title>
+    <link rel="icon" href="assets/logo.png" />
+    <link rel="stylesheet" href="assets/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="container topbar__inner">
+        <a class="brand" href="index.html">
+          <img class="brand__logo" src="assets/logo.png" alt="Glass Todo" />
+          <span class="brand__name">Glass Todo</span>
+        </a>
+        <nav class="nav">
+          <a href="index.html">首页</a>
+          <a href="quickstart.html">开始使用</a>
+          <a href="deploy.html" aria-current="page">部署</a>
+          <a href="config.html">配置</a>
+          <a href="backup.html">备份</a>
+          <a href="dev.html">开发</a>
+          <a href="faq.html">FAQ</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <section class="pagehead">
+        <div class="container">
+          <h1>部署</h1>
+          <p>NAS / 服务器上推荐用 Docker Compose；反代或 Tunnel 时注意跨域与上传大小。</p>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="container split">
+          <div class="card">
+            <h2 class="section__title">Docker Compose（推荐）</h2>
+            <p class="section__desc">
+              关键点：配置 <code>HOST_PORT</code>，并把 <code>HOST_DATA_DIR</code> 挂载出来做持久化。
+            </p>
+            <pre><code>cd local_server/deploy
+cp .env.docker.example .env.docker
+# 编辑 .env.docker：HOST_PORT / HOST_DATA_DIR 等
+
+docker compose --env-file .env.docker up -d
+docker compose ps
+</code></pre>
+            <div class="callout">
+              <strong>数据目录：</strong><code>HOST_DATA_DIR</code> 会挂载到容器 <code>/app/data</code>，里面包含
+              <code>database.sqlite</code> 与 <code>attachments/</code>。
+            </div>
+          </div>
+
+          <div class="card">
+            <h2 class="section__title">反代 / Cloudflare Tunnel</h2>
+            <p class="section__desc">建议优先“同源”（前端与后端同域名），能省掉很多跨域问题。</p>
+            <ul>
+              <li><strong>CORS：</strong>上线时把 <code>CORS_ORIGINS</code> 从 <code>*</code> 改成你的域名白名单。</li>
+              <li><strong>上传大小：</strong>Nginx 反代要设置 <code>client_max_body_size</code>（附件最大 50MB）。</li>
+              <li><strong>同源：</strong>同域名部署时 <code>API_BASE_URL</code> 通常留空。</li>
+            </ul>
+            <div class="callout">
+              <strong>Nginx 示例：</strong>仓库里有参考配置：<code>local_server/deploy/nginx/glass-todo.conf</code>。
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="container">
+          <div class="card">
+            <h2 class="section__title">完整部署文档</h2>
+            <p class="section__desc">更多细节（目录结构、脚本、健康检查、排错）见仓库文件：</p>
+            <pre><code>local_server/deploy/README.md</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <div class="container">
+          <div class="footer__row">
+            <span>&copy; Glass Todo</span>
+            <span class="muted"><a href="index.html">返回首页</a></span>
+          </div>
+        </div>
+      </footer>
+    </main>
+  </body>
+</html>
+

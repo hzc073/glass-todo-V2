@@ -1,18 +1,32 @@
-# Glass-ToDo
+# Glass Todo（Flutter 客户端）
 
-![Glass-ToDo logo](../logo.png)
+![Glass Todo logo](../logo.png)
 
-Glass-ToDo 的 Flutter 客户端（Web / Android）。
+本目录是 Glass Todo 的 Flutter 前端（Web / Android）。
 
-## Getting Started
+- 项目总览与部署入口：`../README.md`
+- Docker / Nginx / 备份脚本等：`../local_server/deploy/README.md`
+- 项目介绍网址（静态文档站点）：`../docs/index.html`
 
-This project is a starting point for a Flutter application.
+## 开发
 
-A few resources to get you started if this is your first Flutter project:
+```bash
+flutter pub get
+flutter run -d chrome
+```
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+## 构建
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+```bash
+flutter build web --release
+flutter build apk --release
+```
+
+## 发布 Web 到后端静态目录
+
+后端会把 `local_server/public/` 作为站点目录对外提供；一键构建并发布 Web：
+
+```powershell
+cd ..\local_server\deploy
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\publish_flutter_web.ps1
+```

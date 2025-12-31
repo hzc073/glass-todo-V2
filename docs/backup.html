@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Glass Todo 备份与恢复：SQLite + 附件目录。" />
+    <title>Glass Todo · 备份</title>
+    <link rel="icon" href="assets/logo.png" />
+    <link rel="stylesheet" href="assets/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="container topbar__inner">
+        <a class="brand" href="index.html">
+          <img class="brand__logo" src="assets/logo.png" alt="Glass Todo" />
+          <span class="brand__name">Glass Todo</span>
+        </a>
+        <nav class="nav">
+          <a href="index.html">首页</a>
+          <a href="quickstart.html">开始使用</a>
+          <a href="deploy.html">部署</a>
+          <a href="config.html">配置</a>
+          <a href="backup.html" aria-current="page">备份</a>
+          <a href="dev.html">开发</a>
+          <a href="faq.html">FAQ</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <section class="pagehead">
+        <div class="container">
+          <h1>备份与恢复</h1>
+          <p>核心思路：备份宿主机的数据目录（SQLite + 附件）。</p>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="container split">
+          <div class="card">
+            <h2 class="section__title">要备份哪些？</h2>
+            <p class="section__desc">Docker 模式下，<code>HOST_DATA_DIR</code> 会挂载到容器 <code>/app/data</code>。</p>
+            <pre><code>/app/data/
+  database.sqlite
+  attachments/
+</code></pre>
+            <div class="callout">
+              <strong>结论：</strong>备份整个 <code>HOST_DATA_DIR</code> 目录即可。
+            </div>
+          </div>
+
+          <div class="card">
+            <h2 class="section__title">推荐流程（更安全）</h2>
+            <p class="section__desc">备份/恢复前先停服务，避免 SQLite 文件不一致。</p>
+            <pre><code>cd local_server/deploy
+docker compose --env-file .env.docker down
+
+# 备份 HOST_DATA_DIR（复制/打包到其它磁盘或对象存储）
+
+docker compose --env-file .env.docker up -d
+</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="container">
+          <div class="card">
+            <h2 class="section__title">脚本（Windows）</h2>
+            <p class="section__desc">仓库已提供备份/恢复脚本（DB + 附件）：</p>
+            <pre><code>local_server/deploy/scripts/backup.ps1
+local_server/deploy/scripts/restore.ps1
+</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <div class="container">
+          <div class="footer__row">
+            <span>&copy; Glass Todo</span>
+            <span class="muted"><a href="index.html">返回首页</a></span>
+          </div>
+        </div>
+      </footer>
+    </main>
+  </body>
+</html>
+

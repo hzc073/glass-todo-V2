@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Glass Todo 配置：Docker 常用环境变量说明。" />
+    <title>Glass Todo · 配置</title>
+    <link rel="icon" href="assets/logo.png" />
+    <link rel="stylesheet" href="assets/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="container topbar__inner">
+        <a class="brand" href="index.html">
+          <img class="brand__logo" src="assets/logo.png" alt="Glass Todo" />
+          <span class="brand__name">Glass Todo</span>
+        </a>
+        <nav class="nav">
+          <a href="index.html">首页</a>
+          <a href="quickstart.html">开始使用</a>
+          <a href="deploy.html">部署</a>
+          <a href="config.html" aria-current="page">配置</a>
+          <a href="backup.html">备份</a>
+          <a href="dev.html">开发</a>
+          <a href="faq.html">FAQ</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <section class="pagehead">
+        <div class="container">
+          <h1>配置</h1>
+          <p>Docker 部署时常用的环境变量。完整模板在仓库：<code>local_server/deploy/.env.docker.example</code>。</p>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="container">
+          <h2 class="section__title">最常用</h2>
+          <div class="grid">
+            <div class="card tile">
+              <h3><code>HOST_PORT</code></h3>
+              <p>宿主机端口（映射到容器 3000）。例：<code>8080</code>。</p>
+            </div>
+            <div class="card tile">
+              <h3><code>HOST_DATA_DIR</code></h3>
+              <p>数据持久化目录（挂载到 <code>/app/data</code>）。建议用绝对路径。</p>
+            </div>
+            <div class="card tile">
+              <h3><code>CORS_ORIGINS</code></h3>
+              <p>跨域白名单（逗号分隔）。上线建议不要用 <code>*</code>。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="container">
+          <h2 class="section__title">可选（前端与标题）</h2>
+          <div class="grid">
+            <div class="card tile">
+              <h3><code>API_BASE_URL</code></h3>
+              <p>前端请求后端地址。同源部署通常留空。</p>
+            </div>
+            <div class="card tile">
+              <h3><code>APP_TITLE</code></h3>
+              <p>前端标题。例：<code>Glass Todo</code>。</p>
+            </div>
+            <div class="card tile">
+              <h3><code>USE_LOCAL_STORAGE</code></h3>
+              <p>是否强制前端使用 LocalStorage（一般不需要）。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="container">
+          <h2 class="section__title">镜像版本</h2>
+          <div class="grid">
+            <div class="card tile">
+              <h3><code>DOCKER_IMAGE</code></h3>
+              <p>镜像名（例如 Docker Hub 用户/仓库）。</p>
+            </div>
+            <div class="card tile">
+              <h3><code>IMAGE_TAG</code></h3>
+              <p>镜像 tag。例：<code>latest</code> 或版本号。</p>
+            </div>
+            <div class="card tile">
+              <h3>还有更多…</h3>
+              <p>附件（S3/R2）等高级配置请查看模板文件注释。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <div class="container">
+          <div class="footer__row">
+            <span>&copy; Glass Todo</span>
+            <span class="muted"><a href="index.html">返回首页</a></span>
+          </div>
+        </div>
+      </footer>
+    </main>
+  </body>
+</html>
+

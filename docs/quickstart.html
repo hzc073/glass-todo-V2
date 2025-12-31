@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Glass Todo 快速开始：Docker / Windows 两种方式启动。" />
+    <title>Glass Todo · 开始使用</title>
+    <link rel="icon" href="assets/logo.png" />
+    <link rel="stylesheet" href="assets/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="container topbar__inner">
+        <a class="brand" href="index.html">
+          <img class="brand__logo" src="assets/logo.png" alt="Glass Todo" />
+          <span class="brand__name">Glass Todo</span>
+        </a>
+        <nav class="nav">
+          <a href="index.html">首页</a>
+          <a href="quickstart.html" aria-current="page">开始使用</a>
+          <a href="deploy.html">部署</a>
+          <a href="config.html">配置</a>
+          <a href="backup.html">备份</a>
+          <a href="dev.html">开发</a>
+          <a href="faq.html">FAQ</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <section class="pagehead">
+        <div class="container">
+          <h1>开始使用</h1>
+          <p>两种方式：Docker（推荐 NAS）或 Windows 绿色启动。</p>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="container split">
+          <div class="card">
+            <h2 class="section__title">方式 A：Docker（推荐 NAS）</h2>
+            <p class="section__desc">最省心：端口 + 数据目录配置好，一条命令启动。</p>
+            <pre><code>cd local_server/deploy
+cp .env.docker.example .env.docker
+# 编辑 .env.docker：HOST_PORT / HOST_DATA_DIR 等
+
+docker compose --env-file .env.docker up -d
+curl http://127.0.0.1:${HOST_PORT:-3000}/health
+</code></pre>
+            <div class="callout">
+              <strong>下一步：</strong>部署细节（反代/Tunnel/注意事项）见 <a href="deploy.html"><code>部署</code></a>。
+            </div>
+          </div>
+
+          <div class="card">
+            <h2 class="section__title">方式 B：Windows 绿色启动</h2>
+            <p class="section__desc">适合本机/局域网快速跑起来，不依赖 Docker。</p>
+            <pre><code>cd local_server\deploy
+copy .env.example .env
+.\run.bat
+
+# 验证
+curl http://127.0.0.1:3000/health
+</code></pre>
+            <div class="callout">
+              <strong>提示：</strong>完整说明在仓库文件 <code>local_server/deploy/README.md</code>。
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="container">
+          <div class="card">
+            <h2 class="section__title">发布 Web（把前端部署到后端）</h2>
+            <p class="section__desc">
+              后端会把 <code>local_server/public/</code> 作为静态站点目录对外提供；一键构建并发布 Web：
+            </p>
+            <pre><code>cd local_server\deploy
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\publish_flutter_web.ps1
+</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <div class="container">
+          <div class="footer__row">
+            <span>&copy; Glass Todo</span>
+            <span class="muted"><a href="index.html">返回首页</a></span>
+          </div>
+        </div>
+      </footer>
+    </main>
+  </body>
+</html>
+

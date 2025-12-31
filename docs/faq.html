@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Glass Todo 常见问题与排错。" />
+    <title>Glass Todo · FAQ</title>
+    <link rel="icon" href="assets/logo.png" />
+    <link rel="stylesheet" href="assets/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="container topbar__inner">
+        <a class="brand" href="index.html">
+          <img class="brand__logo" src="assets/logo.png" alt="Glass Todo" />
+          <span class="brand__name">Glass Todo</span>
+        </a>
+        <nav class="nav">
+          <a href="index.html">首页</a>
+          <a href="quickstart.html">开始使用</a>
+          <a href="deploy.html">部署</a>
+          <a href="config.html">配置</a>
+          <a href="backup.html">备份</a>
+          <a href="dev.html">开发</a>
+          <a href="faq.html" aria-current="page">FAQ</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <section class="pagehead">
+        <div class="container">
+          <h1>FAQ</h1>
+          <p>常见问题与排错入口。更完整的部署排错见 <code>local_server/deploy/README.md</code>。</p>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="container grid">
+          <div class="card tile">
+            <h3>上传附件报 413 / 请求体过大</h3>
+            <p>
+              如果走 Nginx/网关反代，需要放开 <code>client_max_body_size</code>（示例配置已写到
+              <code>local_server/deploy/nginx/glass-todo.conf</code>）。
+            </p>
+          </div>
+
+          <div class="card tile">
+            <h3>跨域（CORS）失败</h3>
+            <p>
+              上线时不要用 <code>CORS_ORIGINS=*</code>。改成你的前端域名白名单；同源部署时
+              <code>API_BASE_URL</code> 通常留空。
+            </p>
+          </div>
+
+          <div class="card tile">
+            <h3>容器升级后数据没了</h3>
+            <p>
+              请确认 <code>HOST_DATA_DIR</code> 已正确挂载（并且备份的是宿主机的数据目录）。
+              建议参考 <a href="backup.html"><code>备份</code></a> 页面流程。
+            </p>
+          </div>
+
+          <div class="card tile">
+            <h3>手机端打开卡顿 / 首屏慢</h3>
+            <p>
+              常见原因是：移动端性能更敏感 + 首屏静态资源较大。建议用浏览器 DevTools
+              查看 Network/Performance，优先确认缓存、首屏资源与重绘频率。
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <div class="container">
+          <div class="footer__row">
+            <span>&copy; Glass Todo</span>
+            <span class="muted"><a href="index.html">返回首页</a></span>
+          </div>
+        </div>
+      </footer>
+    </main>
+  </body>
+</html>
+

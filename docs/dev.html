@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Glass Todo 开发：Flutter 与后端本地运行、构建与发布。" />
+    <title>Glass Todo · 开发</title>
+    <link rel="icon" href="assets/logo.png" />
+    <link rel="stylesheet" href="assets/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="container topbar__inner">
+        <a class="brand" href="index.html">
+          <img class="brand__logo" src="assets/logo.png" alt="Glass Todo" />
+          <span class="brand__name">Glass Todo</span>
+        </a>
+        <nav class="nav">
+          <a href="index.html">首页</a>
+          <a href="quickstart.html">开始使用</a>
+          <a href="deploy.html">部署</a>
+          <a href="config.html">配置</a>
+          <a href="backup.html">备份</a>
+          <a href="dev.html" aria-current="page">开发</a>
+          <a href="faq.html">FAQ</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <section class="pagehead">
+        <div class="container">
+          <h1>开发与构建</h1>
+          <p>前端在 <code>flutter_app/</code>，后端在 <code>local_server/</code>。</p>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="container split">
+          <div class="card">
+            <h2 class="section__title">Flutter（Web）</h2>
+            <pre><code>cd flutter_app
+flutter pub get
+
+# 调试
+flutter run -d chrome
+
+# 构建
+flutter build web --release
+</code></pre>
+          </div>
+
+          <div class="card">
+            <h2 class="section__title">后端（Node.js）</h2>
+            <pre><code>cd local_server
+npm ci
+node server.js
+</code></pre>
+            <div class="callout">
+              <strong>提示：</strong>如果你是部署而不是开发，优先走 <a href="quickstart.html"><code>开始使用</code></a> 的脚本/Docker 流程。
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="container">
+          <div class="card">
+            <h2 class="section__title">一键发布 Web 到后端静态目录</h2>
+            <p class="section__desc">
+              后端静态目录为 <code>local_server/public/</code>，脚本会把 Flutter Web 构建产物镜像过去。
+            </p>
+            <pre><code>cd local_server\deploy
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\publish_flutter_web.ps1
+</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <div class="container">
+          <div class="footer__row">
+            <span>&copy; Glass Todo</span>
+            <span class="muted"><a href="index.html">返回首页</a></span>
+          </div>
+        </div>
+      </footer>
+    </main>
+  </body>
+</html>
+

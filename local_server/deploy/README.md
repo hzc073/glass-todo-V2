@@ -57,6 +57,23 @@ copy .env.example .env
 - `ATTACHMENTS_DIR`：附件目录（建议 `./data/attachments`）
 - `CORS_ORIGINS`：允许访问的前端 Origin（逗号分隔；`*` 表示放开，正式环境不建议）
 - `HOST_PORT`：Docker 映射到宿主机的端口（`HOST_PORT -> 容器 3000`）
+- `IMAGE_TAG`：Docker 镜像 tag（版本号）
+
+### Docker 专用配置（推荐）
+
+为了避免 Windows 绿色启动与 Docker 配置互相干扰，建议 Docker 另用一份配置文件：
+
+```powershell
+cd local_server\deploy
+copy .env.docker.example .env.docker
+```
+
+启动 Docker 时使用：
+
+```bash
+cd local_server/deploy
+docker compose --env-file .env.docker up -d
+```
 
 ---
 
@@ -155,13 +172,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package_windows_po
 
 ```bash
 cd local_server/deploy
-cp .env.example .env
-docker compose up -d --build
+cp .env.docker.example .env.docker
+docker compose --env-file .env.docker up -d
 ```
 
 端口映射规则：
 - 容器内固定 `3000`
-- 宿主机端口通过 `.env` 的 `HOST_PORT` 控制，例如：
+- 宿主机端口通过 `.env.docker` 的 `HOST_PORT` 控制，例如：
   - `HOST_PORT=8080` 表示 `8080 -> 3000`
 
 ### 4.2 验证服务是否正常（健康检查）

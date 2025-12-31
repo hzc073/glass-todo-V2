@@ -113,6 +113,7 @@ local_server/public/holidays/
 .env
 .env.*
 !.env.example
+!.env.docker.example
 
 # ------------------------------------------------------------------------------
 # Main workspace (excluded from git)

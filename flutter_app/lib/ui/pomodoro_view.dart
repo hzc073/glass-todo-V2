@@ -43,6 +43,7 @@ class _PomodoroViewState extends State<PomodoroView> {
 
   Timer? _ticker;
   late final PageController _androidPageController;
+  late final ValueNotifier<int> _remainingMs;
 
   bool _loading = true;
   bool _saving = false;
@@ -74,6 +75,7 @@ class _PomodoroViewState extends State<PomodoroView> {
   void initState() {
     super.initState();
     _androidPageController = PageController();
+    _remainingMs = ValueNotifier<int>(_state.remainingMs);
     _bootstrap();
   }
 
@@ -81,6 +83,7 @@ class _PomodoroViewState extends State<PomodoroView> {
   void dispose() {
     _stopTicker();
     _androidPageController.dispose();
+    _remainingMs.dispose();
     super.dispose();
   }
 
@@ -118,10 +121,13 @@ class _PomodoroViewState extends State<PomodoroView> {
     });
 
     try {
-      final settings = await widget.apiClient.getPomodoroSettings();
-      final savedState = await widget.apiClient.getPomodoroState();
-      final summary = await widget.apiClient.getPomodoroSummary(days: 60);
-      final sessions = await widget.apiClient.getPomodoroSessions(limit: 200);
+      final settingsFuture = widget.apiClient.getPomodoroSettings();
+      final savedStateFuture = widget.apiClient.getPomodoroState();
+      final summaryFuture = widget.apiClient.getPomodoroSummary(days: 60);
+      final sessionsFuture = widget.apiClient.getPomodoroSessions(limit: 200);
+
+      final settings = await settingsFuture;
+      final savedState = await savedStateFuture;
 
       PomodoroState nextState;
       if (savedState == null) {
@@ -139,17 +145,43 @@ class _PomodoroViewState extends State<PomodoroView> {
         }
       }
 
+      if (!mounted) return;
+      _remainingMs.value = nextState.remainingMs;
       setState(() {
         _settings = settings;
         _state = nextState;
         _stageTotalMs = math.max(_durationMsFor(nextState.mode), math.max(1, nextState.remainingMs));
-        _summary = summary;
-        _sessions = sessions;
         _loading = false;
       });
 
       if (_state.isRunning && _state.targetEnd != null) {
         _startTicker();
+      }
+
+      try {
+        final summary = await summaryFuture;
+        final sessions = await sessionsFuture;
+        if (!mounted) return;
+        setState(() {
+          _summary = summary;
+          _sessions = sessions;
+        });
+      } on UnauthorizedException {
+        widget.onLogout();
+      } catch (_) {
+        if (!mounted) return;
+        setState(() {
+          _summary = const PomodoroSummary(
+            totalWorkSessions: 0,
+            totalWorkMinutes: 0,
+            totalBreakMinutes: 0,
+            days: <String, PomodoroDaySummary>{},
+          );
+          _sessions = const <PomodoroSession>[];
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('加载番茄钟数据失败。')),
+        );
       }
     } on UnauthorizedException {
       widget.onLogout();
@@ -218,9 +250,7 @@ class _PomodoroViewState extends State<PomodoroView> {
       return;
     }
     if (!mounted) return;
-    setState(() {
-      _state = _state.copyWith(remainingMs: remaining);
-    });
+    _remainingMs.value = remaining;
   }
 
   void _toggleRunPause() {
@@ -234,9 +264,10 @@ class _PomodoroViewState extends State<PomodoroView> {
   void _start() {
     if (_state.isRunning) return;
     final now = DateTime.now().millisecondsSinceEpoch;
-    final targetEnd = now + _state.remainingMs;
+    final remainingMs = _remainingMs.value;
+    final targetEnd = now + remainingMs;
     final startedAt = _stageStartedAt ?? now;
-    final next = _state.copyWith(isRunning: true, targetEnd: targetEnd);
+    final next = _state.copyWith(isRunning: true, targetEnd: targetEnd, remainingMs: remainingMs);
     setState(() {
       _state = next;
       _stageStartedAt = startedAt;
@@ -251,6 +282,7 @@ class _PomodoroViewState extends State<PomodoroView> {
     final remaining = _state.targetEnd == null ? _state.remainingMs : math.max(0, _state.targetEnd! - now);
     _stopTicker();
     final next = _state.copyWith(isRunning: false, remainingMs: remaining, clearTargetEnd: true);
+    _remainingMs.value = remaining;
     setState(() => _state = next);
     unawaited(_saveState(next));
   }
@@ -259,6 +291,7 @@ class _PomodoroViewState extends State<PomodoroView> {
     _pause();
     final total = _durationMsFor(_state.mode);
     final next = _state.copyWith(remainingMs: total, clearTargetEnd: true);
+    _remainingMs.value = total;
     setState(() {
       _state = next;
       _stageTotalMs = total;
@@ -279,6 +312,7 @@ class _PomodoroViewState extends State<PomodoroView> {
       clearTargetEnd: true,
       isRunning: false,
     );
+    _remainingMs.value = total;
     setState(() {
       _state = next;
       _stageTotalMs = total;
@@ -322,6 +356,7 @@ class _PomodoroViewState extends State<PomodoroView> {
     );
 
     if (mounted) {
+      _remainingMs.value = 0;
       setState(() => _state = finished);
     }
     unawaited(_saveState(finished));
@@ -373,6 +408,7 @@ class _PomodoroViewState extends State<PomodoroView> {
     final nextTotal = _durationMsFor(nextMode);
     final next = finished.copyWith(mode: nextMode, remainingMs: nextTotal);
     if (mounted) {
+      _remainingMs.value = nextTotal;
       setState(() {
         _state = next;
         _stageTotalMs = nextTotal;
@@ -421,6 +457,7 @@ class _PomodoroViewState extends State<PomodoroView> {
 
       if (!_state.isRunning) {
         final total = _durationMsFor(_state.mode);
+        _remainingMs.value = total;
         setState(() {
           _state = _state.copyWith(remainingMs: total);
           _stageTotalMs = total;
@@ -536,8 +573,6 @@ class _PomodoroViewState extends State<PomodoroView> {
   }
 
   Widget _buildTimerColumn(BuildContext context) {
-    final ratio = _stageTotalMs <= 0 ? 0.0 : (_state.remainingMs / _stageTotalMs).clamp(0.0, 1.0);
-    final timeLabel = _formatRemaining(_state.remainingMs);
     final modeLabel = _state.mode.label;
     final selectedTask = _selectedTask;
 
@@ -570,26 +605,33 @@ class _PomodoroViewState extends State<PomodoroView> {
             child: Center(
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 420),
-                  child: AspectRatio(
-                    aspectRatio: 1,
-                    child: TweenAnimationBuilder<double>(
-                      tween: Tween<double>(begin: ratio, end: ratio),
-                      duration: _state.isRunning
-                          ? const Duration(seconds: 1)
-                          : Duration.zero,
-                      curve: Curves.linear,
-                      builder: (context, value, _) => _PomodoroRing(
-                        progress: value,
-                        isRunning: _state.isRunning,
-                        onToggle: _saving ? null : _toggleRunPause,
-                        timeLabel: timeLabel,
-                        onTapTime: _saving ? null : _openSettings,
-                      ),
-                    ),
+                child: AspectRatio(
+                  aspectRatio: 1,
+                  child: ValueListenableBuilder<int>(
+                    valueListenable: _remainingMs,
+                    builder: (context, remainingMs, _) {
+                      final ratio = _stageTotalMs <= 0
+                          ? 0.0
+                          : (remainingMs / _stageTotalMs).clamp(0.0, 1.0);
+                      final timeLabel = _formatRemaining(remainingMs);
+                      return TweenAnimationBuilder<double>(
+                        tween: Tween<double>(end: ratio),
+                        duration: _state.isRunning ? const Duration(seconds: 1) : Duration.zero,
+                        curve: Curves.linear,
+                        builder: (context, value, _) => _PomodoroRing(
+                          progress: value,
+                          isRunning: _state.isRunning,
+                          onToggle: _saving ? null : _toggleRunPause,
+                          timeLabel: timeLabel,
+                          onTapTime: _saving ? null : _openSettings,
+                        ),
+                      );
+                    },
                   ),
                 ),
               ),
             ),
+          ),
           const SizedBox(height: 14),
           Row(
             children: [
@@ -826,6 +868,36 @@ class _PomodoroDashboard extends StatelessWidget {
       historyRows.add(_HistoryRow.session(session));
     }
 
+    final preHistory = <Widget>[
+      _MetricGrid(
+        todayPomodoro: todayPomodoro,
+        totalPomodoro: totalPomodoro,
+        todayFocusMin: todayFocusMin,
+        totalFocusMin: totalFocusMin,
+      ),
+      const SizedBox(height: 14),
+      _SectionTitle(title: '最近七天'),
+      const SizedBox(height: 8),
+      ...last7.map(
+        (item) {
+          final stats = item.stats ??
+              const PomodoroDaySummary(workSessions: 0, workMinutes: 0, breakMinutes: 0);
+          final label = _dayLabel(item.day, now);
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: _DayCard(
+              label: label,
+              sessions: stats.workSessions,
+              minutes: stats.workMinutes,
+            ),
+          );
+        },
+      ),
+      const SizedBox(height: 14),
+      _SectionTitle(title: '完成历史'),
+      const SizedBox(height: 8),
+    ];
+
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -858,65 +930,47 @@ class _PomodoroDashboard extends StatelessWidget {
           Expanded(
             child: loading
                 ? const Center(child: CircularProgressIndicator())
-                : ListView(
-                    children: [
-                      _MetricGrid(
-                        todayPomodoro: todayPomodoro,
-                        totalPomodoro: totalPomodoro,
-                        todayFocusMin: todayFocusMin,
-                        totalFocusMin: totalFocusMin,
-                      ),
-                      const SizedBox(height: 14),
-                      _SectionTitle(title: '最近七天'),
-                      const SizedBox(height: 8),
-                      ...last7.map(
-                        (item) {
-                          final stats = item.stats ?? const PomodoroDaySummary(workSessions: 0, workMinutes: 0, breakMinutes: 0);
-                          final label = _dayLabel(item.day, now);
+                : ListView.builder(
+                    itemCount: preHistory.length + (historyRows.isEmpty ? 2 : historyRows.length + 1),
+                    itemBuilder: (context, index) {
+                      if (index < preHistory.length) return preHistory[index];
+                      final historyIndex = index - preHistory.length;
+
+                      if (historyRows.isEmpty) {
+                        if (historyIndex == 0) {
                           return Padding(
-                            padding: const EdgeInsets.only(bottom: 8),
-                            child: _DayCard(
-                              label: label,
-                              sessions: stats.workSessions,
-                              minutes: stats.workMinutes,
+                            padding: const EdgeInsets.only(top: 6),
+                            child: Text(
+                              '还没有番茄记录',
+                              style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: AppColors.inkSoft),
                             ),
                           );
-                        },
-                      ),
-                      const SizedBox(height: 14),
-                      _SectionTitle(title: '完成历史'),
-                      const SizedBox(height: 8),
-                      if (historyRows.isEmpty)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 6),
-                          child: Text(
-                            '还没有番茄记录',
-                            style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: AppColors.inkSoft),
-                          ),
-                        )
-                      else
-                        ...historyRows.map(
-                          (row) {
-                            if (row.isHeader) {
-                              return Padding(
-                                padding: const EdgeInsets.fromLTRB(2, 10, 2, 6),
-                                child: Text(
-                                  row.label!,
-                                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                        fontWeight: FontWeight.w800,
-                                        color: AppColors.inkSoft,
-                                      ),
-                                ),
-                              );
-                            }
-                            return Padding(
-                              padding: const EdgeInsets.only(bottom: 8),
-                              child: _SessionCard(session: row.session!),
-                            );
-                          },
-                        ),
-                      const SizedBox(height: 6),
-                    ],
+                        }
+                        return const SizedBox(height: 6);
+                      }
+
+                      if (historyIndex < historyRows.length) {
+                        final row = historyRows[historyIndex];
+                        if (row.isHeader) {
+                          return Padding(
+                            padding: const EdgeInsets.fromLTRB(2, 10, 2, 6),
+                            child: Text(
+                              row.label!,
+                              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                    fontWeight: FontWeight.w800,
+                                    color: AppColors.inkSoft,
+                                  ),
+                            ),
+                          );
+                        }
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: _SessionCard(session: row.session!),
+                        );
+                      }
+
+                      return const SizedBox(height: 6);
+                    },
                   ),
           ),
         ],

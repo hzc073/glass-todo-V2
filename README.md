@@ -2,6 +2,8 @@
 
 一个可自托管的轻量任务管理与专注工具（Todo / 日历 / 时间记录 / 番茄钟 / 统计）。
 
+## [点击查看介绍](https://git.gemmm.top/index.html)
+
 - 前端：Flutter（Web / Android）
 - 后端：Node.js（Express）+ SQLite（单文件数据库）
 - 静态站点：后端会把 `local_server/public/` 作为 Web 站点目录对外提供

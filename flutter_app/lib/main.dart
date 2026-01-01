@@ -683,24 +683,64 @@ class _GlassTodoAppState extends State<GlassTodoApp> {
           }
           final sessionsRaw = pomodoro['sessions'];
           if (sessionsRaw is List) {
+            Map<String, dynamic> normalizeSessionRow(
+              Map<String, dynamic> row,
+            ) {
+              return {
+                'id': row['id'],
+                'taskId': row['taskId'] ?? row['task_id'],
+                'taskTitle': row['taskTitle'] ?? row['task_title'],
+                'startedAt': row['startedAt'] ?? row['started_at'],
+                'endedAt': row['endedAt'] ?? row['ended_at'],
+                'durationMin': row['durationMin'] ?? row['duration_min'],
+                'createdAt': row['createdAt'] ?? row['created_at'],
+              };
+            }
             _appendExcelTable(
               excel: excel,
               sheetName: 'pomodoro_sessions',
               rows: sessionsRaw
                   .whereType<Map>()
-                  .map((e) => e.cast<String, dynamic>())
+                  .map((e) => normalizeSessionRow(e.cast<String, dynamic>()))
                   .toList(),
+              preferredColumns: const [
+                'id',
+                'taskId',
+                'taskTitle',
+                'startedAt',
+                'endedAt',
+                'durationMin',
+                'createdAt',
+              ],
             );
           }
           final dailyStatsRaw = pomodoro['dailyStats'];
           if (dailyStatsRaw is List) {
+            Map<String, dynamic> normalizeDailyRow(
+              Map<String, dynamic> row,
+            ) {
+              return {
+                'dateKey': row['dateKey'] ?? row['date_key'],
+                'workSessions': row['workSessions'] ?? row['work_sessions'],
+                'workMinutes': row['workMinutes'] ?? row['work_minutes'],
+                'breakMinutes': row['breakMinutes'] ?? row['break_minutes'],
+                'updatedAt': row['updatedAt'] ?? row['updated_at'],
+              };
+            }
             _appendExcelTable(
               excel: excel,
               sheetName: 'pomodoro_daily',
               rows: dailyStatsRaw
                   .whereType<Map>()
-                  .map((e) => e.cast<String, dynamic>())
+                  .map((e) => normalizeDailyRow(e.cast<String, dynamic>()))
                   .toList(),
+              preferredColumns: const [
+                'dateKey',
+                'workSessions',
+                'workMinutes',
+                'breakMinutes',
+                'updatedAt',
+              ],
             );
           }
         }

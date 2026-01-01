@@ -127,6 +127,9 @@ class _LoginPageState extends State<LoginPage> {
                               TextFormField(
                                 controller: _userController,
                                 enabled: !_loading && !locked,
+                                textInputAction: TextInputAction.next,
+                                onFieldSubmitted: (_) =>
+                                    FocusScope.of(context).nextFocus(),
                                 decoration: const InputDecoration(labelText: '用户名'),
                                 validator: (value) => value == null || value.trim().isEmpty
                                     ? '请输入用户名。'
@@ -136,6 +139,16 @@ class _LoginPageState extends State<LoginPage> {
                               TextFormField(
                                 controller: _passwordController,
                                 enabled: !_loading && !locked,
+                                textInputAction: _showInvite
+                                    ? TextInputAction.next
+                                    : TextInputAction.done,
+                                onFieldSubmitted: (_) {
+                                  if (_showInvite) {
+                                    FocusScope.of(context).nextFocus();
+                                    return;
+                                  }
+                                  unawaited(_handleLogin());
+                                },
                                 decoration: const InputDecoration(labelText: '密码'),
                                 obscureText: true,
                                 validator: (value) => value == null || value.trim().isEmpty
@@ -150,6 +163,9 @@ class _LoginPageState extends State<LoginPage> {
                                         key: const ValueKey('invite'),
                                         controller: _inviteController,
                                         enabled: !_loading && !locked,
+                                        textInputAction: TextInputAction.done,
+                                        onFieldSubmitted: (_) =>
+                                            unawaited(_handleLogin()),
                                         decoration: const InputDecoration(labelText: '邀请码'),
                                       )
                                     : const SizedBox.shrink(key: ValueKey('empty')),
@@ -203,6 +219,7 @@ class _LoginPageState extends State<LoginPage> {
   }
 
   Future<void> _handleLogin() async {
+    if (_loading) return;
     final username = _userController.text.trim();
     if (widget.loginAttemptLimiter.stateFor(username).isLocked) {
       _syncLockoutTimer();

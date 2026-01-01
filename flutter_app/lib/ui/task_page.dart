@@ -792,11 +792,6 @@ class _TaskPageState extends State<TaskPage> {
                     child: _buildQuickAddField(
                       context,
                       autofocus: true,
-                      onSubmitted: (value) async {
-                        final ok = await _tryQuickAdd(value);
-                        if (!mounted) return;
-                        if (ok) _closeAndroidQuickAdd();
-                      },
                     ),
                   ),
                 ),
@@ -2096,9 +2091,9 @@ class _TaskPageState extends State<TaskPage> {
               Expanded(
                 child: TextField(
                   controller: _quickAddController,
-                  focusNode: _useAndroidUi ? null : _quickAddFocusNode,
+                  focusNode: _quickAddFocusNode,
                   autofocus: autofocus,
-                  enabled: !_saving,
+                  enabled: true,
                   decoration: InputDecoration(
                     hintText: _saving ? '正在保存...' : '输入任务名称，回车添加',
                     border: InputBorder.none,
@@ -2107,6 +2102,7 @@ class _TaskPageState extends State<TaskPage> {
                     contentPadding: EdgeInsets.zero,
                   ),
                   textInputAction: TextInputAction.done,
+                  onEditingComplete: () {},
                   onSubmitted: onSubmitted ?? _handleQuickAdd,
                 ),
               ),
@@ -2295,10 +2291,8 @@ class _TaskPageState extends State<TaskPage> {
         }
       }
     }
-    final disabled = _saving ||
-        activeId == null ||
-        activeChecklist == null ||
-        !activeChecklist.canEdit;
+    final disabled =
+        activeId == null || activeChecklist == null || !activeChecklist.canEdit;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
       decoration: BoxDecoration(
@@ -2327,6 +2321,7 @@ class _TaskPageState extends State<TaskPage> {
                 contentPadding: EdgeInsets.zero,
               ),
               textInputAction: TextInputAction.done,
+              onEditingComplete: () {},
               onSubmitted: _handleChecklistQuickAdd,
             ),
           ),
@@ -2413,7 +2408,6 @@ class _TaskPageState extends State<TaskPage> {
     if (title.isEmpty || _saving) return false;
 
     _quickAddController.clear();
-    FocusManager.instance.primaryFocus?.unfocus();
     final subtasks = _buildSubtasksFromDrafts();
     final startTimeValue = _quickAddStartTime;
     final endTimeValue = _quickAddEndTime;
@@ -2484,6 +2478,8 @@ class _TaskPageState extends State<TaskPage> {
 
   Future<void> _handleQuickAdd(String value) async {
     await _tryQuickAdd(value);
+    if (!mounted) return;
+    _quickAddFocusNode.requestFocus();
   }
 
   void _toggleQuickAddExpanded() {
@@ -3608,7 +3604,6 @@ class _TaskPageState extends State<TaskPage> {
     }
 
     _checklistAddController.clear();
-    FocusManager.instance.primaryFocus?.unfocus();
     setState(() => _saving = true);
     try {
       final created = await widget.apiClient

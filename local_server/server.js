@@ -3493,14 +3493,30 @@ app.get('/api/v2/export', authenticate, async (req, res) => {
             }
             : null;
 
-        const pomodoroSessions = await dbAll(
+        const pomodoroSessionRows = await dbAll(
             "SELECT id, task_id, task_title, started_at, ended_at, duration_min, created_at FROM pomodoro_sessions WHERE username = ? ORDER BY ended_at DESC",
             [username]
         );
-        const pomodoroDaily = await dbAll(
+        const pomodoroSessions = pomodoroSessionRows.map((row) => ({
+            id: Number(row.id) || 0,
+            taskId: row.task_id === null || row.task_id === undefined ? null : Number(row.task_id),
+            taskTitle: row.task_title ? String(row.task_title) : null,
+            startedAt: row.started_at === null || row.started_at === undefined ? null : Number(row.started_at),
+            endedAt: Number(row.ended_at) || 0,
+            durationMin: Number(row.duration_min) || 0,
+            createdAt: Number(row.created_at) || 0
+        }));
+        const pomodoroDailyRows = await dbAll(
             "SELECT date_key, work_sessions, work_minutes, break_minutes, updated_at FROM pomodoro_daily_stats WHERE username = ? ORDER BY date_key DESC",
             [username]
         );
+        const pomodoroDaily = pomodoroDailyRows.map((row) => ({
+            dateKey: row.date_key ? String(row.date_key) : '',
+            workSessions: Number(row.work_sessions) || 0,
+            workMinutes: Number(row.work_minutes) || 0,
+            breakMinutes: Number(row.break_minutes) || 0,
+            updatedAt: Number(row.updated_at) || 0
+        }));
 
         return res.json({
             exportedAt: Date.now(),

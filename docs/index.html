@@ -5,11 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Glass Todo：可自托管的轻量任务管理与专注工具（Todo / 日历 / 时间记录 / 番茄钟 / 统计）。"
+      content="Glass Todo：一个可自托管的轻量任务管理与专注工具（Todo / 日历 / 时间记录 / 番茄钟 / 统计）。"
     />
-    <title>Glass Todo · 项目介绍</title>
+    <meta name="theme-color" content="#F3EEE4" />
+    <meta property="og:title" content="Glass Todo" />
+    <meta
+      property="og:description"
+      content="自托管 · 多端使用 · 数据在你手里。Todo / 日历 / 时间记录 / 番茄钟 / 统计，一站式完成。"
+    />
+    <meta property="og:image" content="assets/hero-1.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <title>Glass Todo · 自托管待办与专注工具</title>
     <link rel="icon" href="assets/logo.png" />
     <link rel="stylesheet" href="assets/style.css" />
+    <link rel="stylesheet" href="assets/landing.css" />
   </head>
   <body>
     <header class="topbar">
@@ -18,157 +27,243 @@
           <img class="brand__logo" src="assets/logo.png" alt="Glass Todo" />
           <span class="brand__name">Glass Todo</span>
         </a>
-        <nav class="nav">
-          <a href="index.html" aria-current="page">首页</a>
-          <a href="quickstart.html">开始使用</a>
-          <a href="deploy.html">部署</a>
-          <a href="config.html">配置</a>
-          <a href="backup.html">备份</a>
-          <a href="dev.html">开发</a>
-          <a href="faq.html">FAQ</a>
-        </nav>
+
+        <div class="topbar__right">
+          <nav class="nav">
+            <a href="index.html" aria-current="page">首页</a>
+            <a href="quickstart.html">开始使用</a>
+            <a href="deploy.html">部署</a>
+            <a href="config.html">配置</a>
+            <a href="backup.html">备份</a>
+            <a href="dev.html">开发</a>
+            <a href="faq.html">FAQ</a>
+          </nav>
+          <a class="btn btn--primary btn--compact" href="quickstart.html"
+            >立即开始</a
+          >
+        </div>
       </div>
     </header>
 
-    <main id="top">
-      <section class="hero">
-        <div class="container hero__inner">
-          <div>
-            <h1>Glass Todo</h1>
+    <main id="top" class="landing">
+      <section class="landing-hero">
+        <div class="container landing-hero__inner">
+          <div class="landing-hero__copy">
+            <div class="landing-badge">★ 全新版本 2.0</div>
+            <h1>
+              柔和而专注地<br />
+              <span class="accent">安排每一天</span>
+            </h1>
             <p class="lead">
-              可自托管的轻量任务管理与专注工具（Todo / 日历 / 时间记录 / 番茄钟 / 统计）。
+              Glass Todo 是一个可自托管的轻量任务管理与专注工具：把 Todo、日历、时间记录、番茄钟与统计放在同一个工作流里。
             </p>
 
             <div class="pillrow">
               <span class="pill">Flutter Web / Android</span>
-              <span class="pill">Node.js (Express)</span>
+              <span class="pill">Node.js（Express）</span>
               <span class="pill">SQLite 单文件</span>
               <span class="pill">Docker / NAS</span>
             </div>
 
-            <div class="cta">
-              <a class="btn btn--primary" href="quickstart.html">开始使用</a>
-              <a class="btn" href="deploy.html">部署到 NAS</a>
-              <a class="btn btn--ghost" href="config.html">配置说明</a>
+            <div class="landing-hero__actions">
+              <a class="btn btn--primary btn--lg" href="quickstart.html"
+                >免费开始使用</a
+              >
+              <a class="btn btn--lg" href="#features">查看功能</a>
+              <a class="btn btn--ghost btn--lg" href="deploy.html">部署到 NAS</a>
             </div>
 
             <p class="muted small">
-              想放“仓库地址 / Demo 地址 / 截图”？直接改 `docs/index.html` 的链接与内容即可。
+              自托管，不等于复杂：跟着文档一步一步来，三分钟跑起来。
             </p>
           </div>
 
-          <div class="card hero__card">
-            <h2>适合你吗？</h2>
-            <ul>
-              <li>想把任务、专注与统计放在同一个工具里</li>
-              <li>希望自己掌控数据（SQLite + 附件目录）</li>
-              <li>偏好 NAS/Docker 一键部署</li>
-              <li>需要移动端也能用（Android）</li>
+          <div class="landing-hero__visual">
+            <div class="landing-glow"></div>
+            <div class="stage">
+              <div class="stage__tilt">
+                <div class="device device--desktop">
+                  <div class="device__notch" aria-hidden="true"></div>
+                  <div class="device__screen">
+                    <img
+                      src="assets/hero-1.png"
+                      alt="Glass Todo Web 界面截图"
+                      loading="eager"
+                      decoding="async"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="hero-thumbs" aria-hidden="true">
+              <img
+                src="assets/hero-2.png"
+                alt=""
+                loading="lazy"
+                decoding="async"
+              />
+              <img
+                src="assets/hero-3.png"
+                alt=""
+                loading="lazy"
+                decoding="async"
+              />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="features" class="landing-section landing-section--white">
+        <div class="container feature">
+          <div class="feature__copy">
+            <div class="feature__icon" aria-hidden="true">▦</div>
+            <h2>
+              艾森豪威尔矩阵<br />
+              让重要不被紧急淹没
+            </h2>
+            <p>
+              用四象限把事情分层：重要/紧急一眼分明；用更少的切换，获得更稳定的执行节奏。
+            </p>
+            <ul class="checklist">
+              <li>视觉化优先级排序</li>
+              <li>自由拖拽调整</li>
+              <li>自定义分类标签</li>
             </ul>
           </div>
+          <div class="feature__visual">
+            <img
+              src="assets/feature-matrix.png"
+              alt="艾森豪威尔矩阵截图"
+              loading="lazy"
+              decoding="async"
+            />
+          </div>
         </div>
       </section>
 
-      <section class="section">
+      <section id="details" class="landing-section">
         <div class="container">
-          <h2 class="section__title">模块一览</h2>
-          <p class="section__desc">更少切换应用，把“计划 → 执行 → 复盘”串起来。</p>
+          <div class="bento-head">
+            <h2>每一个细节，都为你考量</h2>
+            <p>我们相信，好用的生产力工具应该是隐形的、无压力的。</p>
+          </div>
 
-          <div class="grid">
-            <div class="card tile">
-              <h3>任务管理</h3>
-              <p>任务列表与状态流转，适合日常清单与执行。</p>
+          <div class="bento">
+            <article class="bento__item bento__item--wide bento__item--warm">
+              <div class="bento__copy">
+                <div class="feature__icon" aria-hidden="true">⏱</div>
+                <h3>沉浸式番茄钟</h3>
+                <p>一个时钟，一段专注。让仪式感成为你持续行动的动力。</p>
+              </div>
+              <div class="bento__visual">
+                <img
+                  src="assets/feature-pomodoro.png"
+                  alt="番茄钟截图"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </div>
+            </article>
+
+            <article class="bento__item bento__item--amber">
+              <div class="bento__copy">
+                <div class="feature__icon" aria-hidden="true">📅</div>
+                <h3>周视图日历</h3>
+                <p>掌控生活的旋律，像谱乐谱一样排期。</p>
+              </div>
+              <div class="bento__visual" style="margin-top: 14px">
+                <img
+                  src="assets/feature-calendar.png"
+                  alt="日历周视图截图"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </div>
+            </article>
+
+            <article class="bento__item">
+              <div class="bento__copy">
+                <div class="feature__icon" aria-hidden="true">⦿</div>
+                <h3>时间回溯</h3>
+                <p>看见每一分钟的价值，生成精美报表。</p>
+              </div>
+              <div class="bento__visual" style="margin-top: 14px">
+                <img
+                  src="assets/feature-time.png"
+                  alt="时间记录与统计截图"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </div>
+            </article>
+
+            <article class="bento__item bento__item--wide bento__item--dark">
+              <div class="bento__copy">
+                <div class="feature__icon" aria-hidden="true">✦</div>
+                <h3>全平台，零距离</h3>
+                <p>
+                  无论在办公室的电脑，还是通勤时的手机，你的清单永远保持实时更新。
+                </p>
+                <div class="bento__pillrow">
+                  <span class="bento__pill">Web</span>
+                  <span class="bento__pill">Android</span>
+                  <span class="bento__pill">Windows / Mac</span>
+                </div>
+              </div>
+              <div class="bento__visual">
+                <img
+                  src="assets/mobile-1.png"
+                  alt="移动端界面截图"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="selfhost" class="landing-section landing-section--white">
+        <div class="container split">
+          <div class="card">
+            <h2 class="section__title">自托管，数据在你手里</h2>
+            <p class="section__desc">
+              后端使用 SQLite（单文件数据库）+ 附件目录，备份/迁移更直观；同时提供一键脚本与部署文档。
+            </p>
+            <div class="cta">
+              <a class="btn" href="config.html">配置说明</a>
+              <a class="btn" href="backup.html">备份恢复</a>
+              <a class="btn" href="deploy.html">反代 / Tunnel</a>
             </div>
-            <div class="card tile">
-              <h3>四象限</h3>
-              <p>重要/紧急维度做优先级整理，减少焦虑。</p>
-            </div>
-            <div class="card tile">
-              <h3>日历</h3>
-              <p>按日/周/月规划节奏，让安排更可视化。</p>
-            </div>
-            <div class="card tile">
-              <h3>时间记录</h3>
-              <p>活动计时与记录，方便复盘与统计。</p>
-            </div>
-            <div class="card tile">
-              <h3>番茄钟</h3>
-              <p>专注节奏 + 自动记录历史 + 统计看板。</p>
-            </div>
-            <div class="card tile">
-              <h3>统计</h3>
-              <p>把“做了多少”用图表与趋势呈现出来。</p>
+          </div>
+
+          <div class="card">
+            <h2 class="section__title">三分钟跑起来（Docker）</h2>
+            <p class="section__desc">适合 NAS：配置好端口与数据目录，启动即可。</p>
+            <pre><code>cd local_server/deploy
+cp .env.docker.example .env.docker
+# 编辑 .env.docker：HOST_PORT / HOST_DATA_DIR 等
+docker compose --env-file .env.docker up -d
+curl http://127.0.0.1:${HOST_PORT:-3000}/health
+</code></pre>
+            <div class="callout">
+              <strong>下一步：</strong>完整说明见
+              <a href="quickstart.html"><code>开始使用</code></a>。
             </div>
           </div>
         </div>
       </section>
 
-      <section class="section">
+      <section class="landing-bottom">
         <div class="container">
-          <h2 class="section__title">从这里开始</h2>
-          <p class="section__desc">首页只做介绍；具体步骤拆成独立页面，点按钮直接跳转。</p>
-
-          <div class="grid">
-            <div class="card linkcard">
-              <div class="linkcard__body">
-                <h3>开始使用</h3>
-                <p>Docker（推荐 NAS）/ Windows 绿色启动，两种方式快速跑起来。</p>
-              </div>
-              <div class="linkcard__cta">
-                <a class="btn" href="quickstart.html">打开</a>
-              </div>
-            </div>
-
-            <div class="card linkcard">
-              <div class="linkcard__body">
-                <h3>部署</h3>
-                <p>Docker Compose、反代与 Tunnel 的关键注意点。</p>
-              </div>
-              <div class="linkcard__cta">
-                <a class="btn" href="deploy.html">打开</a>
-              </div>
-            </div>
-
-            <div class="card linkcard">
-              <div class="linkcard__body">
-                <h3>配置</h3>
-                <p>常用环境变量：端口、数据目录、跨域、标题等。</p>
-              </div>
-              <div class="linkcard__cta">
-                <a class="btn" href="config.html">打开</a>
-              </div>
-            </div>
-
-            <div class="card linkcard">
-              <div class="linkcard__body">
-                <h3>备份</h3>
-                <p>SQLite + 附件目录，怎么备份/恢复最省心。</p>
-              </div>
-              <div class="linkcard__cta">
-                <a class="btn" href="backup.html">打开</a>
-              </div>
-            </div>
-
-            <div class="card linkcard">
-              <div class="linkcard__body">
-                <h3>开发</h3>
-                <p>Flutter 与后端本地开发、构建与发布脚本。</p>
-              </div>
-              <div class="linkcard__cta">
-                <a class="btn" href="dev.html">打开</a>
-              </div>
-            </div>
-
-            <div class="card linkcard">
-              <div class="linkcard__body">
-                <h3>FAQ</h3>
-                <p>常见问题：上传 413、跨域、数据持久化、访问慢等。</p>
-              </div>
-              <div class="linkcard__cta">
-                <a class="btn" href="faq.html">打开</a>
-              </div>
-            </div>
+          <h2>准备好开始更有质感的一天了吗？</h2>
+          <div class="cta" style="justify-content: center">
+            <a class="btn btn--primary btn--lg" href="quickstart.html"
+              >立即开始 · 永久免费</a
+            >
           </div>
+          <p>无需信用卡 · 支持数据导入 · 私密且安全</p>
         </div>
       </section>
 
@@ -176,11 +271,12 @@
         <div class="container">
           <div class="footer__row">
             <span>&copy; Glass Todo</span>
-            <span class="muted">Static docs site in /docs</span>
+            <span class="muted">
+              <a href="#top">返回顶部</a> · <a href="quickstart.html">开始使用</a>
+            </span>
           </div>
         </div>
       </footer>
     </main>
   </body>
 </html>
-

@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Glass Todo：可自托管的轻量任务管理与专注工具（Todo / 日历 / 时间记录 / 番茄钟 / 统计）。"
+    />
+    <title>Glass Todo · 项目介绍</title>
+    <link rel="icon" href="assets/logo.png" />
+    <link rel="stylesheet" href="assets/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="container topbar__inner">
+        <a class="brand" href="index.html">
+          <img class="brand__logo" src="assets/logo.png" alt="Glass Todo" />
+          <span class="brand__name">Glass Todo</span>
+        </a>
+        <nav class="nav">
+          <a href="index.html" aria-current="page">首页</a>
+          <a href="quickstart.html">开始使用</a>
+          <a href="deploy.html">部署</a>
+          <a href="config.html">配置</a>
+          <a href="backup.html">备份</a>
+          <a href="dev.html">开发</a>
+          <a href="faq.html">FAQ</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <div class="container hero__inner">
+          <div>
+            <h1>Glass Todo</h1>
+            <p class="lead">
+              可自托管的轻量任务管理与专注工具（Todo / 日历 / 时间记录 / 番茄钟 / 统计）。
+            </p>
+
+            <div class="pillrow">
+              <span class="pill">Flutter Web / Android</span>
+              <span class="pill">Node.js (Express)</span>
+              <span class="pill">SQLite 单文件</span>
+              <span class="pill">Docker / NAS</span>
+            </div>
+
+            <div class="cta">
+              <a class="btn btn--primary" href="quickstart.html">开始使用</a>
+              <a class="btn" href="deploy.html">部署到 NAS</a>
+              <a class="btn btn--ghost" href="config.html">配置说明</a>
+            </div>
+
+            <p class="muted small">
+              想放“仓库地址 / Demo 地址 / 截图”？直接改 `docs/index.html` 的链接与内容即可。
+            </p>
+          </div>
+
+          <div class="card hero__card">
+            <h2>适合你吗？</h2>
+            <ul>
+              <li>想把任务、专注与统计放在同一个工具里</li>
+              <li>希望自己掌控数据（SQLite + 附件目录）</li>
+              <li>偏好 NAS/Docker 一键部署</li>
+              <li>需要移动端也能用（Android）</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="container">
+          <h2 class="section__title">模块一览</h2>
+          <p class="section__desc">更少切换应用，把“计划 → 执行 → 复盘”串起来。</p>
+
+          <div class="grid">
+            <div class="card tile">
+              <h3>任务管理</h3>
+              <p>任务列表与状态流转，适合日常清单与执行。</p>
+            </div>
+            <div class="card tile">
+              <h3>四象限</h3>
+              <p>重要/紧急维度做优先级整理，减少焦虑。</p>
+            </div>
+            <div class="card tile">
+              <h3>日历</h3>
+              <p>按日/周/月规划节奏，让安排更可视化。</p>
+            </div>
+            <div class="card tile">
+              <h3>时间记录</h3>
+              <p>活动计时与记录，方便复盘与统计。</p>
+            </div>
+            <div class="card tile">
+              <h3>番茄钟</h3>
+              <p>专注节奏 + 自动记录历史 + 统计看板。</p>
+            </div>
+            <div class="card tile">
+              <h3>统计</h3>
+              <p>把“做了多少”用图表与趋势呈现出来。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="container">
+          <h2 class="section__title">从这里开始</h2>
+          <p class="section__desc">首页只做介绍；具体步骤拆成独立页面，点按钮直接跳转。</p>
+
+          <div class="grid">
+            <div class="card linkcard">
+              <div class="linkcard__body">
+                <h3>开始使用</h3>
+                <p>Docker（推荐 NAS）/ Windows 绿色启动，两种方式快速跑起来。</p>
+              </div>
+              <div class="linkcard__cta">
+                <a class="btn" href="quickstart.html">打开</a>
+              </div>
+            </div>
+
+            <div class="card linkcard">
+              <div class="linkcard__body">
+                <h3>部署</h3>
+                <p>Docker Compose、反代与 Tunnel 的关键注意点。</p>
+              </div>
+              <div class="linkcard__cta">
+                <a class="btn" href="deploy.html">打开</a>
+              </div>
+            </div>
+
+            <div class="card linkcard">
+              <div class="linkcard__body">
+                <h3>配置</h3>
+                <p>常用环境变量：端口、数据目录、跨域、标题等。</p>
+              </div>
+              <div class="linkcard__cta">
+                <a class="btn" href="config.html">打开</a>
+              </div>
+            </div>
+
+            <div class="card linkcard">
+              <div class="linkcard__body">
+                <h3>备份</h3>
+                <p>SQLite + 附件目录，怎么备份/恢复最省心。</p>
+              </div>
+              <div class="linkcard__cta">
+                <a class="btn" href="backup.html">打开</a>
+              </div>
+            </div>
+
+            <div class="card linkcard">
+              <div class="linkcard__body">
+                <h3>开发</h3>
+                <p>Flutter 与后端本地开发、构建与发布脚本。</p>
+              </div>
+              <div class="linkcard__cta">
+                <a class="btn" href="dev.html">打开</a>
+              </div>
+            </div>
+
+            <div class="card linkcard">
+              <div class="linkcard__body">
+                <h3>FAQ</h3>
+                <p>常见问题：上传 413、跨域、数据持久化、访问慢等。</p>
+              </div>
+              <div class="linkcard__cta">
+                <a class="btn" href="faq.html">打开</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <div class="container">
+          <div class="footer__row">
+            <span>&copy; Glass Todo</span>
+            <span class="muted">Static docs site in /docs</span>
+          </div>
+        </div>
+      </footer>
+    </main>
+  </body>
+</html>
+

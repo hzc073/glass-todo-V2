@@ -6,12 +6,6 @@
 - 后端：Node.js（Express）+ SQLite（单文件数据库）
 - 静态站点：后端会把 `local_server/public/` 作为 Web 站点目录对外提供
 
-## 文档站点（项目介绍网址）
-
-本仓库自带一个简单的静态文档站点：`docs/index.html`。
-
-- GitHub Pages：在仓库 Settings → Pages 中选择 `Deploy from a branch`，分支选 `main`（或你的默认分支），目录选 `/docs`。
-- 自托管：把 `docs/` 目录作为静态站点发布即可（Nginx / Cloudflare Tunnel / NAS Web Station 都可以）。
 
 ## 快速开始
 

@@ -3,7 +3,7 @@
 项目基本信息：
 - 服务：Node（Express）
 - 默认端口：`3000`
-- 数据库：SQLite（单个 db 文件）
+- 数据库：PostgreSQL（推荐）/ SQLite（可选）
 - 附件：本地目录保存
 - 限制：单个附件最大 `50MB`（反代需要放开请求体大小）
 
@@ -22,7 +22,8 @@ local_server/
   server/
   public/
   data/                      # 持久化数据（重启/升级不丢）
-    database.sqlite          # SQLite db 文件（可通过 DB_PATH 修改）
+    postgres/                # PostgreSQL 数据目录（Docker Compose 默认）
+    database.sqlite          # SQLite db 文件（当 DB_DRIVER=sqlite 时使用）
     attachments/             # 附件目录（可通过 ATTACHMENTS_DIR 修改）
   deploy/
     .env                     # 运行配置（从 .env.example 复制）
@@ -53,11 +54,24 @@ copy .env.example .env
 
 关键配置项（至少）：
 - `PORT`：Windows 绿色启动监听端口（默认 `3000`）
-- `DB_PATH`：SQLite 文件路径（建议 `./data/database.sqlite`）
+- `DB_DRIVER`：数据库类型（`postgres` / `sqlite`）
+- `DATABASE_URL`：PostgreSQL 连接串（当 `DB_DRIVER=postgres` 时使用）
+- `DB_PATH`：SQLite 文件路径（当 `DB_DRIVER=sqlite` 时使用，建议 `./data/database.sqlite`）
 - `ATTACHMENTS_DIR`：附件目录（建议 `./data/attachments`）
 - `CORS_ORIGINS`：允许访问的前端 Origin（逗号分隔；`*` 表示放开，正式环境不建议）
 - `HOST_PORT`：Docker 映射到宿主机的端口（`HOST_PORT -> 容器 3000`）
 - `IMAGE_TAG`：Docker 镜像 tag（版本号）
+
+### Windows 一键 PostgreSQL（可选）
+
+如果你不想在系统里安装 PostgreSQL，可以把 PostgreSQL（Windows binaries）放进仓库里，然后 `run.bat` 自动启动：
+
+1) 解压 PostgreSQL 到 `local_server/bin/postgres/`（确保存在 `bin/postgres/bin/pg_ctl.exe`）
+2) 修改 `deploy/.env`：
+   - `DB_DRIVER=postgres`
+   - `AUTO_START_POSTGRES=true`
+   - `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`（以及可选的 `POSTGRES_PORT`）
+3) 双击 `deploy/run.bat`
 
 ### Docker 专用配置（推荐）
 
@@ -124,7 +138,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\publish_flutter_we
 
 ### 3.4 备份与恢复（Windows）
 
-强烈建议在备份/恢复前先停止服务（避免 SQLite 写入中导致文件不一致）。
+强烈建议在备份/恢复前先停止服务（SQLite 模式下避免写入中导致文件不一致；PostgreSQL 模式建议用 `pg_dump` 在线备份）。
 
 备份（生成目录或 zip）：
 
@@ -198,9 +212,9 @@ curl http://127.0.0.1:${HOST_PORT:-3000}/health
 
 ### 4.3 数据持久化
 
-`docker-compose.yml` 已把宿主机 `../data` 挂载到容器 `/app/data`，因此：
-- 容器重启/更新后，`database.sqlite` 与附件目录仍存在
-- 备份只需要备份宿主机的 `local_server/data/`
+`docker-compose.yml` 已把宿主机 `../data` 用于持久化，因此：
+- PostgreSQL 数据：`local_server/data/postgres/`
+- 附件：`local_server/data/attachments/`
 
 ### 4.4 日志查看与建议
 
@@ -217,7 +231,9 @@ docker compose logs -f --tail=200
 
 ### 4.5 备份与恢复（Docker）
 
-由于使用的是宿主机目录持久化（bind mount），备份/恢复等同于备份/恢复 `local_server/data/`。
+由于使用的是宿主机目录持久化（bind mount），你可以选择：
+- **停机备份**：`docker compose down` 后备份 `local_server/data/`（包含 `postgres/` 与 `attachments/`）
+- **不停机备份**：使用 `pg_dump` 导出数据库 + 备份附件目录（更推荐）
 
 建议流程（更安全）：
 
@@ -288,5 +304,6 @@ docker compose up -d
 - **上传大文件失败**
   - Nginx：确认 `client_max_body_size` >= `50m`
   - 反代/网关：确认没有更小的 body 限制
-- **SQLite 备份不一致/恢复后报错**
-  - 备份/恢复前先停服务（Windows 停止进程 / Docker `docker compose down`）
+- **SQLite 模式备份不一致/恢复后报错**
+  - SQLite：备份/恢复前先停服务（Windows 停止进程 / Docker `docker compose down`）
+  - PostgreSQL：推荐使用 `pg_dump`/`pg_restore`（或停机备份 `data/postgres/`）

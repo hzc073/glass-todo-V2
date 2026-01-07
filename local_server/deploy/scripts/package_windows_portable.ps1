@@ -104,7 +104,8 @@ if (Test-Path -LiteralPath $envExample) {
         if ($line -match '^(\s*API_BASE_URL\s*=)') { 'API_BASE_URL='; continue }
         $line
     }
-    Set-Content -LiteralPath $envPath -Value $outLines -Encoding ASCII
+    # Write UTF-8 (no BOM) so Chinese comments are preserved and env parsing isn't affected by BOM.
+    [System.IO.File]::WriteAllLines($envPath, $outLines, (New-Object System.Text.UTF8Encoding($false)))
 }
 
 # Top-level launcher (double-click)

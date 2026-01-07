@@ -1824,23 +1824,23 @@ app.post('/api/checklist-invites/:inviteId/accept', authenticate, async (req, re
         );
         const shareCreatedAt = existingShare.length ? Number(existingShare[0].created_at) || now : now;
 
-        await dbRun('BEGIN');
-        if (existingShare.length) {
+        await db.transaction(async () => {
+            if (existingShare.length) {
+                await dbRun(
+                    "UPDATE checklist_shares SET owner = ?, can_edit = ? WHERE list_id = ? AND shared_user = ?",
+                    [list.owner, canEdit ? 1 : 0, invite.list_id, req.user.username]
+                );
+            } else {
+                await dbRun(
+                    "INSERT INTO checklist_shares (list_id, owner, shared_user, can_edit, created_at) VALUES (?, ?, ?, ?, ?)",
+                    [invite.list_id, list.owner, req.user.username, canEdit ? 1 : 0, shareCreatedAt]
+                );
+            }
             await dbRun(
-                "UPDATE checklist_shares SET owner = ?, can_edit = ? WHERE list_id = ? AND shared_user = ?",
-                [list.owner, canEdit ? 1 : 0, invite.list_id, req.user.username]
+                "UPDATE checklist_share_invites SET status = ?, updated_at = ?, responded_at = ? WHERE id = ? AND status = ?",
+                [CHECKLIST_INVITE_STATUSES.accepted, now, now, inviteId, CHECKLIST_INVITE_STATUSES.pending]
             );
-        } else {
-            await dbRun(
-                "INSERT INTO checklist_shares (list_id, owner, shared_user, can_edit, created_at) VALUES (?, ?, ?, ?, ?)",
-                [invite.list_id, list.owner, req.user.username, canEdit ? 1 : 0, shareCreatedAt]
-            );
-        }
-        await dbRun(
-            "UPDATE checklist_share_invites SET status = ?, updated_at = ?, responded_at = ? WHERE id = ? AND status = ?",
-            [CHECKLIST_INVITE_STATUSES.accepted, now, now, inviteId, CHECKLIST_INVITE_STATUSES.pending]
-        );
-        await dbRun('COMMIT');
+        });
 
         await insertChecklistAuditLog({
             listId: Number(invite.list_id),
@@ -1863,7 +1863,6 @@ app.post('/api/checklist-invites/:inviteId/accept', authenticate, async (req, re
 
         return res.json({ success: true });
     } catch (e) {
-        try { await dbRun('ROLLBACK'); } catch (rollbackErr) {}
         return res.status(500).json({ error: 'Failed to accept invite' });
     }
 });
@@ -3103,16 +3102,16 @@ app.post('/api/checklists/:id/transfer-owner', authenticate, async (req, res) =>
             return res.status(400).json({ error: 'New owner must already be a member' });
         }
 
-        await dbRun('BEGIN');
-        await dbRun("UPDATE checklists SET owner = ?, updated_at = ? WHERE id = ?", [newOwner, now, listId]);
-        await dbRun("UPDATE checklist_items SET owner = ? WHERE list_id = ?", [newOwner, listId]);
-        await dbRun("UPDATE checklist_shares SET owner = ? WHERE list_id = ?", [newOwner, listId]);
-        await dbRun("DELETE FROM checklist_shares WHERE list_id = ? AND shared_user = ?", [listId, newOwner]);
-        await dbRun(
-            "INSERT OR REPLACE INTO checklist_shares (list_id, owner, shared_user, can_edit, created_at) VALUES (?, ?, ?, ?, ?)",
-            [listId, newOwner, req.user.username, 1, now]
-        );
-        await dbRun('COMMIT');
+        await db.transaction(async () => {
+            await dbRun("UPDATE checklists SET owner = ?, updated_at = ? WHERE id = ?", [newOwner, now, listId]);
+            await dbRun("UPDATE checklist_items SET owner = ? WHERE list_id = ?", [newOwner, listId]);
+            await dbRun("UPDATE checklist_shares SET owner = ? WHERE list_id = ?", [newOwner, listId]);
+            await dbRun("DELETE FROM checklist_shares WHERE list_id = ? AND shared_user = ?", [listId, newOwner]);
+            await dbRun(
+                "INSERT OR REPLACE INTO checklist_shares (list_id, owner, shared_user, can_edit, created_at) VALUES (?, ?, ?, ?, ?)",
+                [listId, newOwner, req.user.username, 1, now]
+            );
+        });
 
         await insertChecklistAuditLog({
             listId,
@@ -3140,7 +3139,6 @@ app.post('/api/checklists/:id/transfer-owner', authenticate, async (req, res) =>
 
         return res.json({ success: true, owner: newOwner });
     } catch (e) {
-        try { await dbRun('ROLLBACK'); } catch (rollbackErr) {}
         return res.status(500).json({ error: 'Failed to transfer owner' });
     }
 });
@@ -3156,6 +3154,7 @@ app.post('/api/tasks/:taskId/attachments', authenticate, (req, res) => {
             fs.unlink(req.file.path, () => {});
             return res.status(400).json({ error: 'Invalid task id' });
         }
+        const taskIdKey = String(taskId);
 
         const originalName = normalizeOriginalName(req.file.originalname);
         const mimeType = req.file.mimetype || 'application/octet-stream';
@@ -3194,32 +3193,31 @@ app.post('/api/tasks/:taskId/attachments', authenticate, (req, res) => {
             task.attachments.push(attachmentMeta);
 
             const newVersion = Date.now();
-            await dbRun('BEGIN');
-            await dbRun(
-                `INSERT INTO attachments
-                (id, owner_user_id, task_id, original_name, mime_type, size, storage_driver, storage_path, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [
-                    attachmentId,
-                    req.user.username,
-                    taskId,
-                    originalName,
-                    mimeType,
-                    size,
-                    stored.storageDriver,
-                    stored.storagePath,
-                    createdAt
-                ]
-            );
-            await dbRun(
-                "INSERT OR REPLACE INTO data (username, json_data, version) VALUES (?, ?, ?)",
-                [req.user.username, JSON.stringify(tasks), newVersion]
-            );
-            await dbRun('COMMIT');
+            await db.transaction(async () => {
+                await dbRun(
+                    `INSERT INTO attachments
+                    (id, owner_user_id, task_id, original_name, mime_type, size, storage_driver, storage_path, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [
+                        attachmentId,
+                        req.user.username,
+                        taskIdKey,
+                        originalName,
+                        mimeType,
+                        size,
+                        stored.storageDriver,
+                        stored.storagePath,
+                        createdAt
+                    ]
+                );
+                await dbRun(
+                    "INSERT OR REPLACE INTO data (username, json_data, version) VALUES (?, ?, ?)",
+                    [req.user.username, JSON.stringify(tasks), newVersion]
+                );
+            });
 
             return res.json({ success: true, attachment: attachmentMeta, version: newVersion });
         } catch (e) {
-            try { await dbRun('ROLLBACK'); } catch (rollbackErr) {}
             if (req.file?.path) fs.unlink(req.file.path, () => {});
             return res.status(500).json({ error: 'Attachment upload failed' });
         }
@@ -3252,13 +3250,13 @@ app.delete('/api/tasks/:taskId/attachments/:attachmentId', authenticate, async (
         }
 
         const newVersion = Date.now();
-        await dbRun('BEGIN');
-        await dbRun("DELETE FROM attachments WHERE id = ? AND owner_user_id = ?", [attachmentId, req.user.username]);
-        await dbRun(
-            "INSERT OR REPLACE INTO data (username, json_data, version) VALUES (?, ?, ?)",
-            [req.user.username, JSON.stringify(tasks), newVersion]
-        );
-        await dbRun('COMMIT');
+        await db.transaction(async () => {
+            await dbRun("DELETE FROM attachments WHERE id = ? AND owner_user_id = ?", [attachmentId, req.user.username]);
+            await dbRun(
+                "INSERT OR REPLACE INTO data (username, json_data, version) VALUES (?, ?, ?)",
+                [req.user.username, JSON.stringify(tasks), newVersion]
+            );
+        });
 
         try {
             await deleteAttachmentFile({
@@ -3271,7 +3269,6 @@ app.delete('/api/tasks/:taskId/attachments/:attachmentId', authenticate, async (
 
         return res.json({ success: true, version: newVersion });
     } catch (e) {
-        try { await dbRun('ROLLBACK'); } catch (rollbackErr) {}
         return res.status(500).json({ error: 'Failed to delete attachment' });
     }
 });
@@ -3931,19 +3928,19 @@ app.post('/api/v2/import', authenticate, async (req, res) => {
     };
 
     try {
-        await dbRun('BEGIN TRANSACTION');
-        if (mode === 'overwrite') {
-            await clearUserData();
-        }
-        await importSettings();
-        await importTasks();
-        await importChecklists();
-        await importTimeTracking();
-        await importPomodoro();
-        await dbRun('COMMIT');
+        await db.transaction(async () => {
+            if (mode === 'overwrite') {
+                await clearUserData();
+            }
+            await importSettings();
+            await importTasks();
+            await importChecklists();
+            await importTimeTracking();
+            await importPomodoro();
+            await db.repairSequences();
+        });
         return res.json({ success: true });
     } catch (e) {
-        try { await dbRun('ROLLBACK'); } catch (rollbackErr) {}
         return res.status(500).json({ error: 'Failed to import data' });
     }
 });
@@ -3971,34 +3968,33 @@ app.post('/api/user/delete', authenticate, async (req, res) => {
     const confirm = String(req.body?.confirm || '').trim();
     if (confirm !== 'DELETE') return res.status(400).json({ error: 'Invalid confirmation' });
     try {
-        await dbRun('BEGIN TRANSACTION');
-        await dbRun("DELETE FROM tasks_v2 WHERE username = ?", [username]);
-        await dbRun("DELETE FROM time_entries WHERE username = ?", [username]);
-        await dbRun("DELETE FROM time_activity_goals WHERE username = ?", [username]);
-        await dbRun("DELETE FROM time_activities WHERE username = ?", [username]);
-        await dbRun("DELETE FROM pomodoro_sessions WHERE username = ?", [username]);
-        await dbRun("DELETE FROM pomodoro_daily_stats WHERE username = ?", [username]);
-        await dbRun("DELETE FROM pomodoro_state WHERE username = ?", [username]);
-        await dbRun("DELETE FROM pomodoro_settings WHERE username = ?", [username]);
-        await dbRun("DELETE FROM user_settings WHERE username = ?", [username]);
-        await dbRun("DELETE FROM push_subscriptions WHERE username = ?", [username]);
-        await dbRun("DELETE FROM fcm_tokens WHERE username = ?", [username]);
-        await dbRun("DELETE FROM data WHERE username = ?", [username]);
+        await db.transaction(async () => {
+            await dbRun("DELETE FROM tasks_v2 WHERE username = ?", [username]);
+            await dbRun("DELETE FROM time_entries WHERE username = ?", [username]);
+            await dbRun("DELETE FROM time_activity_goals WHERE username = ?", [username]);
+            await dbRun("DELETE FROM time_activities WHERE username = ?", [username]);
+            await dbRun("DELETE FROM pomodoro_sessions WHERE username = ?", [username]);
+            await dbRun("DELETE FROM pomodoro_daily_stats WHERE username = ?", [username]);
+            await dbRun("DELETE FROM pomodoro_state WHERE username = ?", [username]);
+            await dbRun("DELETE FROM pomodoro_settings WHERE username = ?", [username]);
+            await dbRun("DELETE FROM user_settings WHERE username = ?", [username]);
+            await dbRun("DELETE FROM push_subscriptions WHERE username = ?", [username]);
+            await dbRun("DELETE FROM fcm_tokens WHERE username = ?", [username]);
+            await dbRun("DELETE FROM data WHERE username = ?", [username]);
 
-        const listRows = await dbAll("SELECT id FROM checklists WHERE owner = ?", [username]);
-        const listIds = listRows.map((r) => Number(r.id)).filter((id) => Number.isFinite(id) && id > 0);
-        for (const listId of listIds) {
-            await dbRun("DELETE FROM checklist_shares WHERE list_id = ?", [listId]);
-            await dbRun("DELETE FROM checklist_columns WHERE list_id = ?", [listId]);
-            await dbRun("DELETE FROM checklist_items WHERE list_id = ?", [listId]);
-        }
-        await dbRun("DELETE FROM checklists WHERE owner = ?", [username]);
+            const listRows = await dbAll("SELECT id FROM checklists WHERE owner = ?", [username]);
+            const listIds = listRows.map((r) => Number(r.id)).filter((id) => Number.isFinite(id) && id > 0);
+            for (const listId of listIds) {
+                await dbRun("DELETE FROM checklist_shares WHERE list_id = ?", [listId]);
+                await dbRun("DELETE FROM checklist_columns WHERE list_id = ?", [listId]);
+                await dbRun("DELETE FROM checklist_items WHERE list_id = ?", [listId]);
+            }
+            await dbRun("DELETE FROM checklists WHERE owner = ?", [username]);
 
-        await dbRun("DELETE FROM users WHERE username = ?", [username]);
-        await dbRun('COMMIT');
+            await dbRun("DELETE FROM users WHERE username = ?", [username]);
+        });
         return res.json({ success: true });
     } catch (e) {
-        try { await dbRun('ROLLBACK'); } catch (rollbackErr) {}
         return res.status(500).json({ error: 'Failed to delete account' });
     }
 });
@@ -4312,14 +4308,18 @@ app.post('/api/admin/reset-pwd', authenticate, requireAdmin, (req, res) => {
     });
 });
 
-app.post('/api/admin/delete-user', authenticate, requireAdmin, (req, res) => {
+app.post('/api/admin/delete-user', authenticate, requireAdmin, async (req, res) => {
     const { targetUser } = req.body;
     if (targetUser === req.user.username) return res.status(400).json({ error: "不能删除自己" });
-    db.serialize(() => {
-        db.run("DELETE FROM users WHERE username = ?", [targetUser]);
-        db.run("DELETE FROM data WHERE username = ?", [targetUser]);
-    });
-    res.json({ success: true });
+    try {
+        await db.transaction(async () => {
+            await dbRun("DELETE FROM users WHERE username = ?", [targetUser]);
+            await dbRun("DELETE FROM data WHERE username = ?", [targetUser]);
+        });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: "DB Error" });
+    }
 });
 
 // 4. 修改密码
@@ -4804,18 +4804,18 @@ app.delete('/api/v2/tasks/trash/empty', authenticate, async (req, res) => {
             attachmentRows = [];
         }
 
-        await dbRun('BEGIN');
-        if (attachmentRows.length) {
+        await db.transaction(async () => {
+            if (attachmentRows.length) {
+                await dbRun(
+                    `DELETE FROM attachments WHERE owner_user_id = ? AND task_id IN (${placeholders})`,
+                    [req.user.username, ...ids]
+                );
+            }
             await dbRun(
-                `DELETE FROM attachments WHERE owner_user_id = ? AND task_id IN (${placeholders})`,
-                [req.user.username, ...ids]
+                "DELETE FROM tasks_v2 WHERE username = ? AND deleted_at IS NOT NULL",
+                [req.user.username]
             );
-        }
-        await dbRun(
-            "DELETE FROM tasks_v2 WHERE username = ? AND deleted_at IS NOT NULL",
-            [req.user.username]
-        );
-        await dbRun('COMMIT');
+        });
 
         for (const attachment of attachmentRows) {
             try {
@@ -4830,7 +4830,6 @@ app.delete('/api/v2/tasks/trash/empty', authenticate, async (req, res) => {
 
         return res.json({ success: true, purged: rows.length });
     } catch (e) {
-        try { await dbRun('ROLLBACK'); } catch (rollbackErr) {}
         return res.status(500).json({ error: 'Failed to empty trash' });
     }
 });
@@ -4885,32 +4884,31 @@ app.post('/api/v2/tasks/:taskId/attachments', authenticate, (req, res) => {
             const attachments = normalizeTaskAttachments(task.attachments_json);
             attachments.push(attachmentMeta);
 
-            await dbRun('BEGIN');
-            await dbRun(
-                `INSERT INTO attachments
-                (id, owner_user_id, task_id, original_name, mime_type, size, storage_driver, storage_path, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [
-                    attachmentId,
-                    req.user.username,
-                    taskId,
-                    originalName,
-                    mimeType,
-                    size,
-                    stored.storageDriver,
-                    stored.storagePath,
-                    createdAt
-                ]
-            );
-            await dbRun(
-                "UPDATE tasks_v2 SET attachments_json = ?, updated_at = ? WHERE id = ? AND username = ?",
-                [JSON.stringify(attachments), createdAt, taskId, req.user.username]
-            );
-            await dbRun('COMMIT');
+            await db.transaction(async () => {
+                await dbRun(
+                    `INSERT INTO attachments
+                    (id, owner_user_id, task_id, original_name, mime_type, size, storage_driver, storage_path, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [
+                        attachmentId,
+                        req.user.username,
+                        taskId,
+                        originalName,
+                        mimeType,
+                        size,
+                        stored.storageDriver,
+                        stored.storagePath,
+                        createdAt
+                    ]
+                );
+                await dbRun(
+                    "UPDATE tasks_v2 SET attachments_json = ?, updated_at = ? WHERE id = ? AND username = ?",
+                    [JSON.stringify(attachments), createdAt, taskId, req.user.username]
+                );
+            });
 
             return res.json({ success: true, attachment: attachmentMeta });
         } catch (e) {
-            try { await dbRun('ROLLBACK'); } catch (rollbackErr) {}
             if (req.file?.path) fs.unlink(req.file.path, () => {});
             if (stored) {
                 try {
@@ -5801,10 +5799,13 @@ if (process.argv[2] === '--reset-admin') {
     const user = process.argv[3];
     const pass = process.argv[4];
     if (user && pass) {
-        const dbCli = new (require('sqlite3').verbose()).Database(path.join(__dirname, 'database.sqlite'));
-        dbCli.run("UPDATE users SET password = ?, is_admin = 1 WHERE username = ?", [pass, user], function(err) {
+        db.run("UPDATE users SET password = ?, is_admin = 1 WHERE username = ?", [pass, user], function(err) {
+            if (err) {
+                console.error(`FAILED: ${err && err.message ? err.message : String(err)}`);
+                process.exit(1);
+            }
             console.log(this.changes > 0 ? `SUCCESS: User [${user}] is now Admin.` : `FAILED: User [${user}] not found.`);
-            process.exit();
+            process.exit(this.changes > 0 ? 0 : 1);
         });
     } else {
         console.log("Usage: node server.js --reset-admin <username> <newpassword>");

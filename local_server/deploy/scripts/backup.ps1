@@ -8,11 +8,13 @@ function Import-DotEnv([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return }
     Get-Content -LiteralPath $Path | ForEach-Object {
         $line = $_.Trim()
+        if ($line.Length -gt 0 -and $line[0] -eq [char]0xFEFF) { $line = $line.TrimStart([char]0xFEFF) } # UTF-8 BOM
         if (-not $line) { return }
         if ($line.StartsWith('#')) { return }
         $idx = $line.IndexOf('=')
         if ($idx -lt 1) { return }
         $name = $line.Substring(0, $idx).Trim()
+        if ($name.Length -gt 0 -and $name[0] -eq [char]0xFEFF) { $name = $name.TrimStart([char]0xFEFF) } # UTF-8 BOM
         $value = $line.Substring($idx + 1).Trim()
         if ($value.StartsWith('"') -and $value.EndsWith('"') -and $value.Length -ge 2) {
             $value = $value.Substring(1, $value.Length - 2)
@@ -34,10 +36,20 @@ $DeployDir = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $ServerDir = (Resolve-Path (Join-Path $DeployDir '..')).Path
 
 Import-DotEnv (Join-Path $DeployDir '.env')
-if (-not $env:DB_PATH) { $env:DB_PATH = './data/database.sqlite' }
 if (-not $env:ATTACHMENTS_DIR) { $env:ATTACHMENTS_DIR = './data/attachments' }
 
-$dbPath = Resolve-IfRelative $ServerDir $env:DB_PATH
+$dbDriver = ($env:DB_DRIVER | ForEach-Object { $_.Trim().ToLowerInvariant() })
+if (-not $dbDriver) { $dbDriver = 'sqlite' }
+
+$dbPath = $null
+if ($dbDriver -eq 'sqlite') {
+    if (-not $env:DB_PATH) { $env:DB_PATH = './data/database.sqlite' }
+    $dbPath = Resolve-IfRelative $ServerDir $env:DB_PATH
+} elseif ($dbDriver -eq 'postgres') {
+    Write-Host "[Warn] DB_DRIVER=postgres detected. This script does not dump PostgreSQL; please use pg_dump (or stop Docker and back up data/postgres)."
+} else {
+    Write-Host "[Warn] Unknown DB_DRIVER=$dbDriver. Skipping DB backup."
+}
 $attachmentsDir = Resolve-IfRelative $ServerDir $env:ATTACHMENTS_DIR
 
 $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
@@ -46,10 +58,12 @@ $backupDir = Join-Path $backupRoot ("backup_{0}" -f $timestamp)
 
 New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
 
-if (Test-Path -LiteralPath $dbPath) {
-    Copy-Item -LiteralPath $dbPath -Destination (Join-Path $backupDir 'database.sqlite') -Force
-} else {
-    Write-Host "[Warn] DB file not found: $dbPath"
+if ($dbPath) {
+    if (Test-Path -LiteralPath $dbPath) {
+        Copy-Item -LiteralPath $dbPath -Destination (Join-Path $backupDir 'database.sqlite') -Force
+    } else {
+        Write-Host "[Warn] DB file not found: $dbPath"
+    }
 }
 
 if (Test-Path -LiteralPath $attachmentsDir) {

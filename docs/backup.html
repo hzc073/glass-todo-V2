@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Glass Todo 备份与恢复：SQLite + 附件目录。" />
+    <meta name="description" content="Glass Todo 备份与恢复：PostgreSQL + 附件目录。" />
     <title>Glass Todo · 备份</title>
     <link rel="icon" href="assets/logo.png" />
     <link rel="stylesheet" href="assets/style.css" />
@@ -31,7 +31,7 @@
       <section class="pagehead">
         <div class="container">
           <h1>备份与恢复</h1>
-          <p>核心思路：备份宿主机的数据目录（SQLite + 附件）。</p>
+          <p>核心思路：备份宿主机的数据目录（PostgreSQL + 附件）。</p>
         </div>
       </section>
 
@@ -39,25 +39,28 @@
         <div class="container split">
           <div class="card">
             <h2 class="section__title">要备份哪些？</h2>
-            <p class="section__desc">Docker 模式下，<code>HOST_DATA_DIR</code> 会挂载到容器 <code>/app/data</code>。</p>
-            <pre><code>/app/data/
-  database.sqlite
+            <p class="section__desc">Docker 模式下，<code>HOST_DATA_DIR</code> 用于持久化（附件 + PostgreSQL 数据）。</p>
+            <pre><code>HOST_DATA_DIR/
   attachments/
+  postgres/
 </code></pre>
             <div class="callout">
-              <strong>结论：</strong>备份整个 <code>HOST_DATA_DIR</code> 目录即可。
+              <strong>结论：</strong>停机备份时，备份整个 <code>HOST_DATA_DIR</code> 目录即可。
             </div>
           </div>
 
           <div class="card">
             <h2 class="section__title">推荐流程（更安全）</h2>
-            <p class="section__desc">备份/恢复前先停服务，避免 SQLite 文件不一致。</p>
+            <p class="section__desc">最省心：停机备份；若需要不停机备份，使用 <code>pg_dump</code> 导出数据库。</p>
             <pre><code>cd local_server/deploy
 docker compose --env-file .env.docker down
 
 # 备份 HOST_DATA_DIR（复制/打包到其它磁盘或对象存储）
 
 docker compose --env-file .env.docker up -d
+
+# 不停机备份（数据库导出）
+docker compose --env-file .env.docker exec -T postgres pg_dump -U ${POSTGRES_USER} ${POSTGRES_DB} &gt; backup.sql
 </code></pre>
           </div>
         </div>
@@ -67,7 +70,7 @@ docker compose --env-file .env.docker up -d
         <div class="container">
           <div class="card">
             <h2 class="section__title">脚本（Windows）</h2>
-            <p class="section__desc">仓库已提供备份/恢复脚本（DB + 附件）：</p>
+            <p class="section__desc">仓库已提供 SQLite 模式的备份/恢复脚本（DB + 附件）；PostgreSQL 模式请使用 <code>pg_dump</code>/<code>pg_restore</code>。</p>
             <pre><code>local_server/deploy/scripts/backup.ps1
 local_server/deploy/scripts/restore.ps1
 </code></pre>
@@ -86,4 +89,3 @@ local_server/deploy/scripts/restore.ps1
     </main>
   </body>
 </html>
-

@@ -124,3 +124,5 @@ main/
 # Release artifacts (excluded from git)
 # ------------------------------------------------------------------------------
 release/
+local_server/postgres/
+local_server/bin/postgres/

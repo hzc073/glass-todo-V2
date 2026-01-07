@@ -5,7 +5,7 @@
 ## [点击查看介绍](https://git.gemmm.top/index.html)
 
 - 前端：Flutter（Web / Android）
-- 后端：Node.js（Express）+ SQLite（单文件数据库）
+- 后端：Node.js（Express）+ PostgreSQL
 - 静态站点：后端会把 `local_server/public/` 作为 Web 站点目录对外提供
 
 
@@ -56,7 +56,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\publish_flutter_we
 ## 项目结构
 
 - `flutter_app/`：Flutter 客户端（Web / Android）
-- `local_server/`：Node/Express 后端（SQLite + 附件）
+- `local_server/`：Node/Express 后端（PostgreSQL + 附件）
 - `local_server/deploy/`：Docker Compose、反代示例、备份恢复脚本
 
 更多部署细节见：`local_server/deploy/README.md`。
